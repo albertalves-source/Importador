@@ -20,7 +20,7 @@ class JSONParser:
             return texto
 
 # --- CONFIGURAÇÃO DA API GEMINI ---
-DEFAULT_KEY = "AIzaSyB_mDR97ABexRXVSUQkxd_bgYjL_xHKaw8"
+DEFAULT_KEY = ""
 
 def call_gemini_api_direct(file_name, file_bytes, model_name, api_key, status_placeholder):
     """
