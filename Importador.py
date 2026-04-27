@@ -24,7 +24,7 @@ DEFAULT_KEY = ""
 
 def call_gemini_api_direct(file_name, file_bytes, model_name, api_key, status_placeholder):
     """
-    Chamada direta à API via requests (sem dependência de SDKs problemáticos).
+    Chamada direta à API via requests.
     Feita para ser 100% à prova de erros de payload (400) e lidar bem com rate limit (429) e sobrecarga (503).
     """
     if not api_key:
@@ -57,7 +57,7 @@ def call_gemini_api_direct(file_name, file_bytes, model_name, api_key, status_pl
         }]
     }
 
-    # Aumentamos para 5 tentativas para dar mais tolerância aos servidores cheios (503)
+    # 5 tentativas para dar mais tolerância aos servidores cheios (503)
     for attempt in range(5):
         try:
             response = requests.post(url, json=payload, timeout=120)
@@ -115,9 +115,10 @@ def formatar_valor(valor, casas=2):
 def gerar_registro_0000(cnpj):
     return f"|0000|{limpar_cnpj(cnpj)}|"
 
-def gerar_registro_1000(nf):
+def gerar_registro_1000(nf, obs=""):
     dt = nf.get('data', '')
-    campos = ["1000", "1", limpar_cnpj(nf.get('cnpj_forn', '')), "", "1", "1102", "", str(nf.get('doc', '')), nf.get('serie', '1'), "", dt, dt, formatar_valor(nf.get('valor_total', 0)), "", "IMPORTACAO IA", "C", "", "", "", "", "", "", "", "", "E"]
+    # O campo obs preenche a posição de observação/histórico do registro 1000
+    campos = ["1000", "1", limpar_cnpj(nf.get('cnpj_forn', '')), "", "1", "1102", "", str(nf.get('doc', '')), nf.get('serie', '1'), "", dt, dt, formatar_valor(nf.get('valor_total', 0)), "", obs, "C", "", "", "", "", "", "", "", "", "E"]
     return "|" + "|".join(campos) + "|" + "|" * 70
 
 def gerar_registro_1020(nf):
@@ -126,30 +127,35 @@ def gerar_registro_1020(nf):
     val_icms = float(v) * (float(aliq) / 100)
     return f"|1020|1||{formatar_valor(v)}|{formatar_valor(aliq)}|{formatar_valor(val_icms)}|0,00|0,00|0,00|0,00|{formatar_valor(v)}||||"
 
-def gerar_registro_1300(nf):
-    return f"|1300|{nf.get('data', '')}|55|5|{formatar_valor(nf.get('valor_total', 0))}|1|IMPORTACAO IA|SISTEMA|"
+def gerar_registro_1300(nf, obs=""):
+    # O campo obs preenche o complemento do registro 1300
+    return f"|1300|{nf.get('data', '')}|55|5|{formatar_valor(nf.get('valor_total', 0))}|1|{obs}|SISTEMA|"
 
 # --- INTERFACE VISUAL ---
-st.set_page_config(page_title="Domínio Automator v5.1", layout="wide")
+st.set_page_config(page_title="Domínio Automator v5.2", layout="wide")
 
-st.title("⚡ Domínio Automator - Fila Resiliente (Anti-503)")
+st.title("⚡ Domínio Automator - Fila Resiliente (V5.2)")
 
 with st.sidebar:
     st.header("⚙️ Painel de Controlo")
     
-    # Campo para inserir as chaves
-    api_input = st.text_area("Gemini API Keys", value=DEFAULT_KEY, help="Se usar mais de uma, certifique-se de que são de Contas Google diferentes.")
+    api_input = st.text_area("Gemini API Keys", value=DEFAULT_KEY, help="Se usar mais de uma, separe por linhas.")
     keys_list = [k.strip() for k in api_input.replace(',', '\n').split('\n') if k.strip()]
     
-    # Modelos disponíveis
     lista_modelos = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
     sel_model = st.selectbox("Versão do Gemini", lista_modelos, index=0)
     
     cnpj_alvo = st.text_input("CNPJ Empresa Destino", value="33333333000191")
     
-    st.success("🔒 **Tolerância a Falhas:** O sistema agora tenta ler novamente quando os servidores da Google estão cheios (Erro 503).")
+    st.markdown("---")
+    st.subheader("📝 Textos Livres")
+    # Campo adicionado para o utilizador escolher o texto da observação ou deixar vazio
+    texto_observacao = st.text_input("Observação/Histórico (Reg. 1000 e 1300)", value="", help="Deixe vazio para não sair nenhum texto, ou escreva algo como 'NFSE'.")
+    
+    st.markdown("---")
+    st.subheader("⏱️ Velocidade")
     delay_global = st.slider("Pausa Obrigatória (Segundos)", 2, 10, 4)
-    st.caption("Pausa de 4s garante um máximo de 15 notas por minuto (Limite da API).")
+    st.caption("Pausa de 4s recomendada para o limite gratuito.")
 
     if st.button("🔴 PARAR SISTEMA", use_container_width=True):
         st.session_state.parar = True
@@ -216,17 +222,14 @@ with t1:
                             del st.session_state.falhas[f.name]
                     else:
                         st.session_state.falhas[f.name] = erro
-                        # Se bloqueou por cota e temos mais chaves, trocamos
                         if "429" in str(erro) or "Limite" in str(erro) or "503" in str(erro):
                             if len(keys_list) > 1:
                                 key_index += 1
                                 status_msg.info("A tentar usar a próxima Chave de API...")
                     
-                    # Atualiza a barra e a percentagem
                     total_ok = len(st.session_state.notas_finalizadas)
                     pbar.progress(total_ok / total_arquivos)
                     
-                    # PAUSA OBRIGATÓRIA ENTRE NOTAS PARA NÃO SER BLOQUEADO
                     status_msg.markdown(f"⏱️ Pausa de segurança ({delay_global}s) para evitar bloqueio do Google...")
                     time.sleep(delay_global)
                 
@@ -234,12 +237,10 @@ with t1:
                     status_msg.success("🎉 Leitura de todo o lote concluída!")
                 st.rerun()
 
-    # Mostra tabela de erros (se existirem)
     if st.session_state.falhas:
         with st.expander(f"⚠️ Notas com Falha ({len(st.session_state.falhas)}) - Leia a coluna 'Motivo'"):
             st.table(pd.DataFrame([{"Arquivo": k, "Motivo": v} for k, v in st.session_state.falhas.items()]))
 
-    # Mostra tabela de sucessos
     if st.session_state.notas_finalizadas:
         st.subheader("✅ Notas Lidas com Sucesso")
         df_ok = pd.DataFrame(list(st.session_state.notas_finalizadas.values()))
@@ -249,14 +250,15 @@ with t2:
     if st.session_state.notas_finalizadas:
         st.subheader("Exportar para Sistema Domínio")
         buffer = [gerar_registro_0000(cnpj_alvo)]
+        
+        # Passa o texto configurado pelo utilizador para os geradores
         for nf in st.session_state.notas_finalizadas.values():
-            buffer.append(gerar_registro_1000(nf))
+            buffer.append(gerar_registro_1000(nf, texto_observacao))
             buffer.append(gerar_registro_1020(nf))
-            buffer.append(gerar_registro_1300(nf))
+            buffer.append(gerar_registro_1300(nf, texto_observacao))
             
         txt_final = "\r\n".join(buffer)
         
-        # Mostra o botão verde de download
         st.download_button(
             label=f"📥 Transferir Ficheiro de Importação ({len(st.session_state.notas_finalizadas)} Notas)",
             data=txt_final.encode('latin-1', errors='replace'),
@@ -268,4 +270,4 @@ with t2:
         st.info("Nenhuma nota processada. Vá à primeira aba para iniciar a fila.")
 
 st.divider()
-st.caption("v5.1 - Fila Sequencial com Tolerância aos Servidores da Google (Anti-503).")
+st.caption("v5.2 - Campo de observação dinâmico adicionado.")
