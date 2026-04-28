@@ -54,14 +54,14 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
         # 1. NÚMERO DO DOCUMENTO
         doc_str = None
         
-        # Tentativa 1: Busca no texto limpo (Ignora captura de datas usando negative lookahead (?!\/) )
+        # Tentativa 1: Busca no texto limpo (Aumentado alcance para 35 chars)
         for padrao in [
-            r"NUMERO DA NFS-E[^\d]{0,10}0*(\d+)(?!\/)",
-            r"NUMERO DA NOTA[^\d]{0,10}0*(\d+)(?!\/)",
-            r"NOTA FISCAL[^\d]{0,10}0*(\d+)(?!\/)",
-            r"NOTA:[^\d]{0,10}0*(\d+)(?!\/)",
-            r"NFS-E[^\d]{0,10}0*(\d+)(?!\/)",
-            r"NUMERO[^\d]{0,10}0*(\d+)(?!\/)"
+            r"NUMERO DA NFS-E[^\d]{0,35}0*(\d+)(?!\/)",
+            r"NUMERO DA NOTA[^\d]{0,35}0*(\d+)(?!\/)",
+            r"NOTA FISCAL[^\d]{0,35}0*(\d+)(?!\/)",
+            r"NOTA:[^\d]{0,35}0*(\d+)(?!\/)",
+            r"NFS-E[^\d]{0,35}0*(\d+)(?!\/)",
+            r"NUMERO[^\d]{0,35}0*(\d+)(?!\/)"
         ]:
             matches = re.findall(padrao, texto_limpo)
             valid_matches = [m for m in matches if len(m) < 12] # Filtro de segurança extra
@@ -72,9 +72,9 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
         # Tentativa 2: Busca no texto denso se a tentativa 1 falhou
         if not doc_str:
             for padrao in [
-                r"NUMERODANFS-E[^\d]{0,15}0*(\d+)(?!\/)",
-                r"NUMERODANOTA[^\d]{0,15}0*(\d+)(?!\/)",
-                r"NOTA:[^\d]{0,15}0*(\d+)(?!\/)"
+                r"NUMERODANFS-E[^\d]{0,35}0*(\d+)(?!\/)",
+                r"NUMERODANOTA[^\d]{0,35}0*(\d+)(?!\/)",
+                r"NOTA:[^\d]{0,35}0*(\d+)(?!\/)"
             ]:
                 matches = re.findall(padrao, texto_denso)
                 valid_matches = [m for m in matches if len(m) < 12]
@@ -82,9 +82,9 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
                     doc_str = valid_matches[0]
                     break
 
-        # Tentativa 3: Padrão Ginfes/Guarulhos (Número isolado que aparece antes de um código de verificação de 9 dígitos)
+        # Tentativa 3: Padrão Ginfes/Guarulhos (Imune a datas como 2025 usando negative lookbehind)
         if not doc_str:
-            ginfes_match = re.search(r"\b(\d+)\s+[A-Z0-9]{9}\b", texto_limpo)
+            ginfes_match = re.search(r"(?<!/)\b(\d+)\s+[A-Z0-9]{9}\b", texto_limpo)
             if ginfes_match:
                 doc_str = ginfes_match.group(1)
                 
@@ -92,9 +92,9 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
             dados["doc"] = int(doc_str)
             
         # 2. DATA
-        data_match = re.search(r"COMPETENCIADANFS-E[^\d]*(\d{2}/\d{2}/\d{4})", texto_denso)
-        if not data_match: data_match = re.search(r"EMISSAO[^\d]*(\d{2}/\d{2}/\d{4})", texto_denso)
-        if not data_match: data_match = re.search(r"DATA[^\d]*(\d{2}/\d{2}/\d{4})", texto_denso)
+        data_match = re.search(r"COMPETENCIADANFS-E[^\d]{0,40}(\d{2}/\d{2}/\d{4})", texto_denso)
+        if not data_match: data_match = re.search(r"EMISSAO[^\d]{0,40}(\d{2}/\d{2}/\d{4})", texto_denso)
+        if not data_match: data_match = re.search(r"DATA[^\d]{0,40}(\d{2}/\d{2}/\d{4})", texto_denso)
         if not data_match: data_match = re.search(r"(\d{2}/\d{2}/\d{4})", texto_denso) # Pega a primeira data que aparecer
         if data_match: dados["data"] = data_match.group(1)
             
@@ -106,17 +106,17 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
             
         if cnpjs: dados["cnpj_forn"] = re.sub(r"\D", "", cnpjs[0])
             
-        # 4. VALOR TOTAL (Super flexível: Encontra todas as matches e ignora ativamente "0,00" ou "0.00")
+        # 4. VALOR TOTAL (Aumentado o "raio de visão" para 45 caracteres não-numéricos)
         padroes_valor = [
-            r"ALIQUOTA[^\d]{0,15}(\d+(?:[.,]\d{3})*[.,]\d{2})", 
-            r"VALORLIQUIDO[^\d]{0,15}(\d+(?:[.,]\d{3})*[.,]\d{2})",
-            r"VALORDOS?SERVICOS?[^\d]{0,15}(\d+(?:[.,]\d{3})*[.,]\d{2})",
-            r"VALORTOTALDOS?SERVICOS?[^\d]{0,15}(\d+(?:[.,]\d{3})*[.,]\d{2})",
-            r"TOTALDOS?SERVICOS?[^\d]{0,15}(\d+(?:[.,]\d{3})*[.,]\d{2})",
-            r"VALORBRUTO[^\d]{0,15}(\d+(?:[.,]\d{3})*[.,]\d{2})",
-            r"VALORTOTAL[^\d]{0,15}(\d+(?:[.,]\d{3})*[.,]\d{2})",
-            r"TOTAL[^\d]{0,15}(\d+(?:[.,]\d{3})*[.,]\d{2})",
-            r"R\$[^\d]{0,15}(\d+(?:[.,]\d{3})*[.,]\d{2})" 
+            r"ALIQUOTA[^\d]{0,45}(\d+(?:[.,]\d{3})*[.,]\d{2})", 
+            r"VALORLIQUIDO[^\d]{0,45}(\d+(?:[.,]\d{3})*[.,]\d{2})",
+            r"VALORDOS?SERVICOS?[^\d]{0,45}(\d+(?:[.,]\d{3})*[.,]\d{2})",
+            r"VALORTOTALDOS?SERVICOS?[^\d]{0,45}(\d+(?:[.,]\d{3})*[.,]\d{2})",
+            r"TOTALDOS?SERVICOS?[^\d]{0,45}(\d+(?:[.,]\d{3})*[.,]\d{2})",
+            r"VALORBRUTO[^\d]{0,45}(\d+(?:[.,]\d{3})*[.,]\d{2})",
+            r"VALORTOTAL[^\d]{0,45}(\d+(?:[.,]\d{3})*[.,]\d{2})",
+            r"TOTAL[^\d]{0,45}(\d+(?:[.,]\d{3})*[.,]\d{2})",
+            r"R\$[^\d]{0,45}(\d+(?:[.,]\d{3})*[.,]\d{2})" 
         ]
         
         v_raw = None
@@ -236,8 +236,8 @@ def gerar_registro_1300(nf, obs=""):
     return f"|1300|{nf.get('data', '')}|55|5|{formatar_valor(nf.get('valor_total', 0))}|1|{obs}|SISTEMA|"
 
 # --- INTERFACE VISUAL ---
-st.set_page_config(page_title="Domínio Automator v8.6", layout="wide")
-st.title("⚡ Domínio Automator - V8.6 (Blindagem Máxima)")
+st.set_page_config(page_title="Domínio Automator v8.7", layout="wide")
+st.title("⚡ Domínio Automator - V8.7 (Visão Expandida)")
 
 with st.sidebar:
     st.header("⚙️ Painel de Controlo")
@@ -367,10 +367,10 @@ with t2:
         st.download_button(
             label=f"📥 Transferir Ficheiro de Importação ({len(st.session_state.notas_finalizadas)} Notas)",
             data=txt_final.encode('latin-1', errors='replace'),
-            file_name=f"lote_dominio_V8.6_{datetime.now().strftime('%H%M')}.txt",
+            file_name=f"lote_dominio_V8.7_{datetime.now().strftime('%H%M')}.txt",
             mime="text/plain",
             use_container_width=True
         )
 
 st.divider()
-st.caption("v8.6 - Algoritmos anti-data e anti-zero implementados no Modo Offline.")
+st.caption("v8.7 - Visão Expandida e Proteção contra Falsos Positivos de Data.")
