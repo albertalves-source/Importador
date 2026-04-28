@@ -270,7 +270,7 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("🚀 Escolha a Tecnologia:")
     metodo = st.radio("Método de Leitura:", [
-        "1. MODO RELÂMPAGO (Código Offline) - RECOMENDADO", 
+        "1. MODO RÁPIDO (Código Offline) - RECOMENDADO", 
         "2. MODO LENTO (Inteligência Artificial Google)"
     ])
     modo_offline = "RELÂMPAGO" in metodo
@@ -398,4 +398,4 @@ with t2:
         )
 
 st.divider()
-st.caption("v9.2 - Motor Híbrido: Extração de Dinheiro e Trechos imune a colunas e Salsichas Numéricas.")
+st.caption("by Albert.")
