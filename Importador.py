@@ -262,7 +262,7 @@ def gerar_registro_1300(nf, obs=""):
 
 # --- INTERFACE VISUAL ---
 st.set_page_config(page_title="Domínio Automator v9.2", layout="wide")
-st.title("⚡ Domínio Automator - V9.2 (O Motor Híbrido)")
+st.title("Importador de Notas Automatizado.")
 
 with st.sidebar:
     st.header("⚙️ Painel de Controlo")
