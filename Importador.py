@@ -6,11 +6,13 @@ import json
 import time
 import requests
 import re
+import io
+import PyPDF2 # Biblioteca super rápida para ler texto de PDFs
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class JSONParser:
     @staticmethod
     def extrair_json_puro(texto):
-        """Extrai apenas o conteúdo JSON, ignorando conversas e formatações da IA."""
         try:
             match = re.search(r'\{.*\}', texto, re.DOTALL)
             if match:
@@ -19,148 +21,157 @@ class JSONParser:
         except:
             return texto
 
-# --- CONFIGURAÇÃO DA API GEMINI ---
-DEFAULT_KEY = ""
+# ==========================================
+# MOTOR DE EXTRAÇÃO OFFLINE (CÓDIGO PURO)
+# ==========================================
+def extrair_dados_pdf_offline(file_name, file_bytes):
+    """
+    Lê o PDF instantaneamente sem usar IA.
+    Configurado para o Padrão Nacional (DANFSe v1.0) e Padrão São Paulo.
+    """
+    try:
+        # Abre o PDF e extrai o texto bruto
+        leitor = PyPDF2.PdfReader(io.BytesIO(file_bytes))
+        texto = ""
+        for pagina in leitor.pages:
+            texto += pagina.extract_text() + "\n"
+            
+        dados = {
+            "doc": None,
+            "serie": "1",
+            "data": None,
+            "cnpj_forn": None,
+            "valor_total": None,
+            "aliq_icms": 0.0,
+            "file_name": file_name
+        }
+
+        # 1. TENTA LER COMO "PADRÃO SÃO PAULO CAPITAL"
+        if "PREFEITURA DO MUNICÍPIO DE SÃO PAULO" in texto or "SECRETARIA MUNICIPAL DA FAZENDA" in texto:
+            doc_match = re.search(r"Número da Nota[\s\n]+(\d+)", texto)
+            data_match = re.search(r"Data e Hora de Emissão[\s\n]+(\d{2}/\d{2}/\d{4})", texto)
+            cnpj_match = re.search(r"PRESTADOR DE SERVIÇOS.*?CPF/CNPJ:\s*([\d\.\-\/]+)", texto, re.DOTALL)
+            valor_match = re.search(r"VALOR TOTAL DO SERVIÇO\s*=\s*R\$\s*([\d\.,]+)", texto)
+            
+            if doc_match: dados["doc"] = int(doc_match.group(1)) # Remove zeros à esquerda
+            if data_match: dados["data"] = data_match.group(1)
+            if cnpj_match: dados["cnpj_forn"] = re.sub(r"\D", "", cnpj_match.group(1))
+            if valor_match:
+                v_str = valor_match.group(1).replace('.', '').replace(',', '.')
+                dados["valor_total"] = float(v_str)
+
+        # 2. TENTA LER COMO "PADRÃO NACIONAL (DANFSe v1.0)"
+        elif "DANFSe v1.0" in texto or "Documento Auxiliar da NFS-e" in texto:
+            doc_match = re.search(r"Número da NFS-e[\s\n]+(\d+)", texto)
+            data_match = re.search(r"Competência da NFS-e[\s\n]+(\d{2}/\d{2}/\d{4})", texto)
+            if not data_match:
+                data_match = re.search(r"Data e Hora da emissão.*?[\s\n]+(\d{2}/\d{2}/\d{4})", texto)
+            
+            # Procura CNPJ apenas do Emitente/Prestador
+            cnpj_match = re.search(r"EMITENTE DA NFS-e.*?CNPJ/CPF/NIF[\s\n]+([\d\.\-\/]+)", texto, re.DOTALL)
+            
+            # Valor do Serviço
+            valor_match = re.search(r"Valor do Serviço[\s\n]+R\$\s*([\d\.,]+)", texto)
+            if not valor_match:
+                valor_match = re.search(r"Valor Líquido da NFS-e[\s\n]+R\$\s*([\d\.,]+)", texto)
+                
+            if doc_match: dados["doc"] = int(doc_match.group(1))
+            if data_match: dados["data"] = data_match.group(1)
+            if cnpj_match: dados["cnpj_forn"] = re.sub(r"\D", "", cnpj_match.group(1))
+            if valor_match: 
+                v_str = valor_match.group(1).replace('.', '').replace(',', '.')
+                dados["valor_total"] = float(v_str)
+
+        # VALIDAÇÃO FINAL
+        if dados["doc"] and dados["cnpj_forn"] and dados["valor_total"] is not None:
+            return dados, None
+        else:
+            return None, "Layout do PDF desconhecido ou não suportado no modo offline."
+            
+    except Exception as e:
+        return None, f"Erro ao ler PDF offline: {str(e)}"
+
+# ==========================================
+# MOTOR DE EXTRAÇÃO IA (GEMINI) - FALLBACK
+# ==========================================
+DEFAULT_KEY = "AIzaSyB_mDR97ABexRXVSUQkxd_bgYjL_xHKaw8"
 
 def call_gemini_api_direct(file_name, file_bytes, model_name, api_key, status_placeholder):
-    """
-    Chamada direta à API via requests.
-    Feita para ser 100% à prova de erros de payload (400) e lidar bem com rate limit (429) e sobrecarga (503).
-    """
-    if not api_key:
-        return None, "Chave de API ausente."
-
+    if not api_key: return None, "Chave de API ausente."
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key.strip()}"
     base64_data = base64.b64encode(file_bytes).decode('utf-8')
-    
     prompt = """
-    Extraia os dados desta Nota Fiscal de Serviço (NFS-e).
-    Responda APENAS com um objeto JSON válido, sem a marcação ```json e sem texto adicional.
-    
-    Campos exatos:
-    {
-      "doc": 162,
-      "serie": "1",
-      "data": "01/03/2026",
-      "cnpj_forn": "14243715000180",
-      "valor_total": 16018.50,
-      "aliq_icms": 0.0
-    }
+    Extraia os dados desta Nota Fiscal de Serviço (NFS-e). Responda APENAS com um objeto JSON válido.
+    Campos exatos: {"doc": 162, "serie": "1", "data": "01/03/2026", "cnpj_forn": "14243715000180", "valor_total": 16018.50, "aliq_icms": 0.0}
     """
-
-    payload = {
-        "contents": [{
-            "parts": [
-                {"text": prompt},
-                {"inlineData": {"mimeType": "application/pdf", "data": base64_data}}
-            ]
-        }]
-    }
-
-    # 5 tentativas para dar mais tolerância aos servidores cheios (503)
-    for attempt in range(5):
+    payload = {"contents": [{"parts": [{"text": prompt}, {"inlineData": {"mimeType": "application/pdf", "data": base64_data}}]}]}
+    
+    for attempt in range(4):
         try:
             response = requests.post(url, json=payload, timeout=120)
-            
             if response.status_code == 200:
-                res_json = response.json()
-                raw_text = res_json['candidates'][0]['content']['parts'][0]['text']
-                
-                json_str = JSONParser.extrair_json_puro(raw_text)
-                data = json.loads(json_str)
+                data = json.loads(JSONParser.extrair_json_puro(response.json()['candidates'][0]['content']['parts'][0]['text']))
                 data['file_name'] = file_name
                 return data, None
-                
-            elif response.status_code == 429: # Erro de Cota / Limite
-                wait_time = 15 * (attempt + 1)
-                status_placeholder.warning(f"⏳ Limite da cota (429). Pausando por {wait_time}s...")
-                time.sleep(wait_time)
+            elif response.status_code == 429:
+                time.sleep(15 * (attempt + 1))
                 continue
-                
-            elif response.status_code in [500, 503, 504]: # Servidores sobrecarregados
-                wait_time = 10 * (attempt + 1)
-                status_placeholder.warning(f"⏳ Servidores do Google sobrecarregados (Erro {response.status_code}). Nova tentativa em {wait_time}s...")
-                time.sleep(wait_time)
+            elif response.status_code in [500, 503, 504]:
+                time.sleep(10 * (attempt + 1))
                 continue
-                
-            elif response.status_code == 404:
-                return None, f"Erro 404: O modelo '{model_name}' não existe nesta chave."
-                
-            elif response.status_code == 400:
-                err_msg = response.json().get('error', {}).get('message', 'Erro desconhecido')
-                return None, f"Erro 400 (Chave/Formato): {err_msg}"
-                
             else:
-                return None, f"Erro inesperado do Google: {response.status_code} - {response.text[:100]}"
-                
-        except json.JSONDecodeError:
-             return None, "A IA não conseguiu formatar os dados corretamente."
+                return None, f"Erro API: {response.status_code}"
         except Exception as e:
-            if attempt == 4:
-                return None, f"Falha de conexão: {str(e)}"
             time.sleep(5)
-            
-    return None, "Desistência após 5 bloqueios/sobrecargas consecutivas do Google."
+    return None, "Desistência após falhas de IA."
 
 # --- FUNÇÕES DO DOMÍNIO SISTEMAS ---
-def limpar_cnpj(valor):
-    return "".join(filter(str.isdigit, str(valor or "")))
-
+def limpar_cnpj(valor): return "".join(filter(str.isdigit, str(valor or "")))
 def formatar_valor(valor, casas=2):
-    try:
-        return f"{float(valor):.{casas}f}".replace('.', ',')
-    except:
-        return "0,00"
-
-def gerar_registro_0000(cnpj):
-    return f"|0000|{limpar_cnpj(cnpj)}|"
-
+    try: return f"{float(valor):.{casas}f}".replace('.', ',')
+    except: return "0,00"
+def gerar_registro_0000(cnpj): return f"|0000|{limpar_cnpj(cnpj)}|"
 def gerar_registro_1000(nf, obs=""):
     dt = nf.get('data', '')
-    # O campo obs preenche a posição de observação/histórico do registro 1000
     campos = ["1000", "1", limpar_cnpj(nf.get('cnpj_forn', '')), "", "1", "1102", "", str(nf.get('doc', '')), nf.get('serie', '1'), "", dt, dt, formatar_valor(nf.get('valor_total', 0)), "", obs, "C", "", "", "", "", "", "", "", "", "E"]
     return "|" + "|".join(campos) + "|" + "|" * 70
-
 def gerar_registro_1020(nf):
-    v = nf.get('valor_total', 0)
-    aliq = nf.get('aliq_icms', 0) or 0
-    val_icms = float(v) * (float(aliq) / 100)
-    return f"|1020|1||{formatar_valor(v)}|{formatar_valor(aliq)}|{formatar_valor(val_icms)}|0,00|0,00|0,00|0,00|{formatar_valor(v)}||||"
-
+    v, aliq = nf.get('valor_total', 0), nf.get('aliq_icms', 0) or 0
+    return f"|1020|1||{formatar_valor(v)}|{formatar_valor(aliq)}|{formatar_valor(float(v) * (float(aliq) / 100))}|0,00|0,00|0,00|0,00|{formatar_valor(v)}||||"
 def gerar_registro_1300(nf, obs=""):
-    # O campo obs preenche o complemento do registro 1300
     return f"|1300|{nf.get('data', '')}|55|5|{formatar_valor(nf.get('valor_total', 0))}|1|{obs}|SISTEMA|"
 
 # --- INTERFACE VISUAL ---
-st.set_page_config(page_title="Domínio Automator v5.2", layout="wide")
-
-st.title("⚡ Domínio Automator - Fila Resiliente (V5.2)")
+st.set_page_config(page_title="Domínio Automator v7.0", layout="wide")
+st.title("⚡ Domínio Automator - V7.0 (Híbrido)")
 
 with st.sidebar:
     st.header("⚙️ Painel de Controlo")
     
-    api_input = st.text_area("Gemini API Keys", value=DEFAULT_KEY, help="Se usar mais de uma, separe por linhas.")
-    keys_list = [k.strip() for k in api_input.replace(',', '\n').split('\n') if k.strip()]
+    st.markdown("---")
+    st.subheader("🚀 Escolha a Tecnologia:")
+    metodo = st.radio("Método de Leitura:", [
+        "1. MODO RELÂMPAGO (Código Offline) - RECOMENDADO", 
+        "2. MODO LENTO (Inteligência Artificial Google)"
+    ])
+    modo_offline = "RELÂMPAGO" in metodo
     
-    lista_modelos = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
-    sel_model = st.selectbox("Versão do Gemini", lista_modelos, index=0)
+    if modo_offline:
+        st.success("O sistema vai usar Código Puro. Processa centenas de notas em poucos segundos! Não consome internet.")
+    else:
+        st.warning("Uso da IA do Google. Mais tolerante a layouts estranhos, mas muito mais lento.")
+        api_input = st.text_area("Gemini API Keys", value=DEFAULT_KEY)
+        keys_list = [k.strip() for k in api_input.replace(',', '\n').split('\n') if k.strip()]
+        sel_model = st.selectbox("Versão do Gemini", ["gemini-2.0-flash", "gemini-1.5-flash"], index=0)
+        delay_global = st.slider("Pausa entre notas (IA)", 2, 10, 4)
     
+    st.markdown("---")
     cnpj_alvo = st.text_input("CNPJ Empresa Destino", value="33333333000191")
-    
-    st.markdown("---")
-    st.subheader("📝 Textos Livres")
-    # Campo adicionado para o utilizador escolher o texto da observação ou deixar vazio
-    texto_observacao = st.text_input("Observação/Histórico (Reg. 1000 e 1300)", value="", help="Deixe vazio para não sair nenhum texto, ou escreva algo como 'NFSE'.")
-    
-    st.markdown("---")
-    st.subheader("⏱️ Velocidade")
-    delay_global = st.slider("Pausa Obrigatória (Segundos)", 2, 10, 4)
-    st.caption("Pausa de 4s recomendada para o limite gratuito.")
+    texto_observacao = st.text_input("Observação (Reg. 1000/1300)", value="")
 
     if st.button("🔴 PARAR SISTEMA", use_container_width=True):
         st.session_state.parar = True
 
-# Inicialização da memória do Streamlit
 if 'notas_finalizadas' not in st.session_state: st.session_state.notas_finalizadas = {}
 if 'falhas' not in st.session_state: st.session_state.falhas = {}
 if 'parar' not in st.session_state: st.session_state.parar = False
@@ -175,74 +186,79 @@ with t1:
         ja_processados = [f.name for f in arquivos if f.name in st.session_state.notas_finalizadas]
         pendentes = [f for f in arquivos if f.name not in st.session_state.notas_finalizadas]
         
-        st.info(f"📊 Total: **{total_arquivos}** | ✅ Concluídas: **{len(ja_processados)}** | ⏳ Na Fila: **{len(pendentes)}**")
+        st.info(f"📊 Lote: **{total_arquivos}** | ✅ Lidas: **{len(ja_processados)}** | ⏳ Na Fila: **{len(pendentes)}**")
         
         col_btn1, col_btn2 = st.columns(2)
-        iniciar = col_btn1.button("🔥 Iniciar/Retomar Fila", use_container_width=True)
-        
+        btn_start = col_btn1.button("🔥 INICIAR PROCESSAMENTO GERAL", use_container_width=True)
         if col_btn2.button("🗑️ Limpar Memória", use_container_width=True):
             st.session_state.notas_finalizadas = {}
             st.session_state.falhas = {}
             st.session_state.parar = False
             st.rerun()
             
-        if iniciar:
+        if btn_start:
             st.session_state.parar = False
-            if not keys_list:
-                st.error("Insira pelo menos uma Chave de API.")
-            else:
-                pbar = st.progress(len(ja_processados) / total_arquivos if total_arquivos > 0 else 0)
-                status_msg = st.empty()
-                
-                key_index = 0
-                
-                # LAÇO SEQUENCIAL
-                for idx, f in enumerate(pendentes):
-                    if st.session_state.parar:
-                        status_msg.warning("Processamento interrompido. Pode retomar quando quiser.")
-                        break
-                        
-                    current_key = keys_list[key_index % len(keys_list)]
-                    status_msg.markdown(f"📄 A ler nota **{len(st.session_state.notas_finalizadas) + 1} de {total_arquivos}**: `{f.name}`")
+            pbar = st.progress(0)
+            status_msg = st.empty()
+            
+            # PREPARAÇÃO DOS BYTES
+            tarefas = []
+            for f in pendentes:
+                f.seek(0)
+                tarefas.append((f.name, f.read()))
+            
+            # ==========================================
+            # EXECUÇÃO MODO OFFLINE (SEGUNDOS)
+            # ==========================================
+            if modo_offline:
+                status_msg.info("⚡ A ler as notas na velocidade da luz...")
+                inicio = time.time()
+                for f_name, f_bytes in tarefas:
+                    if st.session_state.parar: break
                     
-                    # Leitura segura do arquivo
-                    f.seek(0)
-                    file_bytes = f.read()
-                    
-                    if not file_bytes:
-                        st.session_state.falhas[f.name] = "Ficheiro corrompido ou ilegível."
-                        continue
-                    
-                    # Faz a chamada à API
-                    res, erro = call_gemini_api_direct(f.name, file_bytes, sel_model, current_key, status_msg)
-                    
+                    res, erro = extrair_dados_pdf_offline(f_name, f_bytes)
                     if res:
-                        st.session_state.notas_finalizadas[f.name] = res
-                        if f.name in st.session_state.falhas: 
-                            del st.session_state.falhas[f.name]
+                        st.session_state.notas_finalizadas[f_name] = res
+                        if f_name in st.session_state.falhas: del st.session_state.falhas[f_name]
                     else:
-                        st.session_state.falhas[f.name] = erro
-                        if "429" in str(erro) or "Limite" in str(erro) or "503" in str(erro):
-                            if len(keys_list) > 1:
-                                key_index += 1
-                                status_msg.info("A tentar usar a próxima Chave de API...")
-                    
-                    total_ok = len(st.session_state.notas_finalizadas)
-                    pbar.progress(total_ok / total_arquivos)
-                    
-                    status_msg.markdown(f"⏱️ Pausa de segurança ({delay_global}s) para evitar bloqueio do Google...")
-                    time.sleep(delay_global)
+                        st.session_state.falhas[f_name] = erro
+                        
+                    pbar.progress(len(st.session_state.notas_finalizadas) / total_arquivos)
                 
-                if not st.session_state.parar:
-                    status_msg.success("🎉 Leitura de todo o lote concluída!")
-                st.rerun()
+                tempo_total = round(time.time() - inicio, 2)
+                status_msg.success(f"🎉 Leitura Concluída em incríveis {tempo_total} segundos!")
+            
+            # ==========================================
+            # EXECUÇÃO MODO IA LENTO (MINUTOS)
+            # ==========================================
+            else:
+                key_index = 0
+                for idx, (f_name, f_bytes) in enumerate(tarefas):
+                    if st.session_state.parar: break
+                    current_key = keys_list[key_index % len(keys_list)]
+                    status_msg.markdown(f"🧠 IA a ler nota **{len(st.session_state.notas_finalizadas) + 1}/{total_arquivos}**: `{f_name}`")
+                    
+                    res, erro = call_gemini_api_direct(f_name, f_bytes, sel_model, current_key, status_msg)
+                    if res:
+                        st.session_state.notas_finalizadas[f_name] = res
+                        if f_name in st.session_state.falhas: del st.session_state.falhas[f_name]
+                    else:
+                        st.session_state.falhas[f_name] = erro
+                        if "429" in str(erro) and len(keys_list) > 1: key_index += 1
+                        
+                    pbar.progress(len(st.session_state.notas_finalizadas) / total_arquivos)
+                    status_msg.markdown(f"⏱️ Pausa de {delay_global}s...")
+                    time.sleep(delay_global)
+                if not st.session_state.parar: status_msg.success("🎉 Leitura IA Concluída!")
+            
+            st.rerun()
 
     if st.session_state.falhas:
-        with st.expander(f"⚠️ Notas com Falha ({len(st.session_state.falhas)}) - Leia a coluna 'Motivo'"):
+        with st.expander(f"⚠️ Notas com Falha ({len(st.session_state.falhas)}) - Tente usar a IA para estas!"):
             st.table(pd.DataFrame([{"Arquivo": k, "Motivo": v} for k, v in st.session_state.falhas.items()]))
 
     if st.session_state.notas_finalizadas:
-        st.subheader("✅ Notas Lidas com Sucesso")
+        st.subheader("✅ Notas Lidas")
         df_ok = pd.DataFrame(list(st.session_state.notas_finalizadas.values()))
         st.dataframe(df_ok[['doc', 'cnpj_forn', 'valor_total', 'data', 'file_name']], use_container_width=True)
 
@@ -250,24 +266,18 @@ with t2:
     if st.session_state.notas_finalizadas:
         st.subheader("Exportar para Sistema Domínio")
         buffer = [gerar_registro_0000(cnpj_alvo)]
-        
-        # Passa o texto configurado pelo utilizador para os geradores
         for nf in st.session_state.notas_finalizadas.values():
             buffer.append(gerar_registro_1000(nf, texto_observacao))
             buffer.append(gerar_registro_1020(nf))
             buffer.append(gerar_registro_1300(nf, texto_observacao))
-            
         txt_final = "\r\n".join(buffer)
-        
         st.download_button(
             label=f"📥 Transferir Ficheiro de Importação ({len(st.session_state.notas_finalizadas)} Notas)",
             data=txt_final.encode('latin-1', errors='replace'),
-            file_name=f"lote_dominio_V5_{datetime.now().strftime('%H%M')}.txt",
+            file_name=f"lote_dominio_FAST_{datetime.now().strftime('%H%M')}.txt",
             mime="text/plain",
             use_container_width=True
         )
-    else:
-        st.info("Nenhuma nota processada. Vá à primeira aba para iniciar a fila.")
 
 st.divider()
-st.caption("v5.2 - Campo de observação dinâmico adicionado.")
+st.caption("v7.0 - Integração de Motor de Extração Offline de Altíssima Velocidade.")
