@@ -45,11 +45,10 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
         
         dados = {"doc": None, "serie": "1", "data": None, "cnpj_forn": None, "valor_total": None, "aliq_icms": 0.0, "file_name": file_name}
         
-        # 1. NÚMERO DO DOCUMENTO (Expandido para "NOTA:")
+        # 1. NÚMERO DO DOCUMENTO (Proteção contra captura de número do RPS)
         doc_match = re.search(r"NUMERODANFS-E[^\d]*0*(\d+)", texto_denso)
         if not doc_match: doc_match = re.search(r"NUMERODANOTA[^\d]*0*(\d+)", texto_denso)
-        if not doc_match: doc_match = re.search(r"NOTAFISCAL[^\d]*0*(\d+)", texto_denso)
-        if not doc_match: doc_match = re.search(r"NOTA[^\d]*0*(\d+)", texto_denso)
+        if not doc_match: doc_match = re.search(r"NOTA:[^\d]*0*(\d+)", texto_denso) # Especifico para NOTA: para evitar NOTAFISCAL
         if not doc_match: doc_match = re.search(r"NFS-E[^\d]*0*(\d+)", texto_denso)
         if doc_match: dados["doc"] = int(doc_match.group(1))
             
@@ -64,34 +63,37 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
         cnpjs = re.findall(r"(\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2})", texto_denso)
         if cnpjs: dados["cnpj_forn"] = re.sub(r"\D", "", cnpjs[0])
             
-        # 4. VALOR TOTAL (Expandido para "VALOR LIQUIDO")
-        valor_match = re.search(r"VALORLIQUIDO[^\d]*([\d\.,]+)", texto_denso)
-        if not valor_match: valor_match = re.search(r"VALORDOSERVICO[^\d]*([\d\.,]+)", texto_denso)
-        if not valor_match: valor_match = re.search(r"VALORTOTALDOSERVICO[^\d]*([\d\.,]+)", texto_denso)
-        if not valor_match: valor_match = re.search(r"VALORTOTAL[^\d]*([\d\.,]+)", texto_denso)
-        if not valor_match: valor_match = re.search(r"R\$[^\d]*([\d\.,]+)", texto_denso) # Fallback
+        # 4. VALOR TOTAL (Super flexível e seguro contra valores colados como "0,005.000,00")
+        # Forçamos a regex a apanhar apenas UM formato monetário de cada vez
+        padroes_valor = [
+            r"ALIQUOTA\(\%\)[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})", # Layout específico WebISS Campina Grande
+            r"VALORLIQUIDO[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
+            r"VALORDOSSERVICOS?[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
+            r"VALORTOTALDOSERVICOS?[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
+            r"VALORTOTAL[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
+            r"R\$[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})" # Fallback final
+        ]
         
-        if valor_match:
-            v_raw = valor_match.group(1)
-            # Lógica segura para converter a moeda brasileira para decimal (Python)
-            if ',' in v_raw:
-                v_str = v_raw.replace('.', '').replace(',', '.')
-            else:
-                if v_raw.count('.') >= 1:
-                    partes = v_raw.rsplit('.', 1)
-                    if len(partes[1]) == 2:
-                        v_str = partes[0].replace('.', '') + '.' + partes[1]
-                    else:
-                        v_str = v_raw.replace('.', '')
-                else:
-                    v_str = v_raw
+        v_raw = None
+        for padrao in padroes_valor:
+            match = re.search(padrao, texto_denso)
+            if match:
+                val = match.group(1)
+                # Rejeita o valor se for o desconto de 0,00 que aparece antes do valor líquido
+                if val not in ["0,00", "0.00"]: 
+                    v_raw = val
+                    break
+        
+        # Conversão segura do valor formatado em texto para Decimal
+        if v_raw:
+            v_str = v_raw.replace('.', '').replace(',', '.')
             dados["valor_total"] = float(v_str)
             
         # Validação final robusta
         if dados["doc"] is not None and dados["cnpj_forn"] and dados["valor_total"] is not None:
             return dados, None
         else:
-            return None, f"Leitura Incompleta -> Doc:{dados['doc']} | CNPJ:{dados['cnpj_forn']} | R$:{dados['valor_total']}"
+            return None, f"Leitura Incompleta -> Doc:{dados.get('doc')} | CNPJ:{dados.get('cnpj_forn')} | R$:{dados.get('valor_total')}"
             
     except Exception as e:
         return None, f"Erro no Motor Offline: {str(e)}"
@@ -149,9 +151,11 @@ def call_gemini_api_direct(file_name, file_bytes, model_name, api_key, status_pl
             elif response.status_code == 404:
                 return None, f"Erro HTTP 404: Modelo '{model_name}' não encontrado. Tente a opção '-latest' na barra lateral."
             elif response.status_code == 429:
+                last_err = f"Limite de requisições excedido (Erro 429) na tentativa {attempt+1}."
                 time.sleep(15 * (attempt + 1))
                 continue
             elif response.status_code in [500, 503, 504]:
+                last_err = f"Servidores do Google sobrecarregados (Erro {response.status_code}) na tentativa {attempt+1}."
                 time.sleep(10 * (attempt + 1))
                 continue
             else:
