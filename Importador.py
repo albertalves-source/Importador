@@ -8,6 +8,7 @@ import requests
 import re
 import io
 import PyPDF2 
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class JSONParser:
@@ -26,7 +27,7 @@ class JSONParser:
 # ==========================================
 def extrair_dados_pdf_offline(file_name, file_bytes):
     """
-    Lê o PDF de forma indestrutível, removendo todos os espaços para 
+    Lê o PDF de forma indestrutível, removendo todos os espaços e acentos para 
     evitar problemas de formatação da biblioteca PyPDF2.
     """
     try:
@@ -39,17 +40,20 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
         # Transforma o texto numa massa densa sem espaços e em maiúsculas
         texto_denso = re.sub(r'\s+', '', texto_bruto).upper()
         
+        # Remove acentos (Ex: NÚMERO -> NUMERO, SERVIÇO -> SERVICO)
+        texto_denso = ''.join(c for c in unicodedata.normalize('NFD', texto_denso) if unicodedata.category(c) != 'Mn')
+        
         dados = {"doc": None, "serie": "1", "data": None, "cnpj_forn": None, "valor_total": None, "aliq_icms": 0.0, "file_name": file_name}
         
         # 1. NÚMERO DO DOCUMENTO
-        doc_match = re.search(r"NÚMERODANFS-E0*(\d+)", texto_denso)
-        if not doc_match: doc_match = re.search(r"NÚMERODANOTA0*(\d+)", texto_denso)
+        doc_match = re.search(r"NUMERODANFS-E0*(\d+)", texto_denso)
+        if not doc_match: doc_match = re.search(r"NUMERODANOTA0*(\d+)", texto_denso)
         if not doc_match: doc_match = re.search(r"NFS-E0*(\d+)", texto_denso)
         if doc_match: dados["doc"] = int(doc_match.group(1))
             
         # 2. DATA
-        data_match = re.search(r"COMPETÊNCIADANFS-E(\d{2}/\d{2}/\d{4})", texto_denso)
-        if not data_match: data_match = re.search(r"EMISSÃO(\d{2}/\d{2}/\d{4})", texto_denso)
+        data_match = re.search(r"COMPETENCIADANFS-E(\d{2}/\d{2}/\d{4})", texto_denso)
+        if not data_match: data_match = re.search(r"EMISSAO(\d{2}/\d{2}/\d{4})", texto_denso)
         if not data_match: data_match = re.search(r"(\d{2}/\d{2}/\d{4})", texto_denso) # Pega a primeira data que aparecer
         if data_match: dados["data"] = data_match.group(1)
             
@@ -58,9 +62,9 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
         if cnpjs: dados["cnpj_forn"] = re.sub(r"\D", "", cnpjs[0])
             
         # 4. VALOR TOTAL (Procura em múltiplos locais possíveis)
-        valor_match = re.search(r"VALORDOSERVIÇOR\$([\d\.,]+)", texto_denso)
-        if not valor_match: valor_match = re.search(r"VALORTOTALDOSERVIÇO=R\$([\d\.,]+)", texto_denso)
-        if not valor_match: valor_match = re.search(r"VALORLÍQUIDODANFS-ER\$([\d\.,]+)", texto_denso)
+        valor_match = re.search(r"VALORDOSERVICO.*?R\$([\d\.,]+)", texto_denso)
+        if not valor_match: valor_match = re.search(r"VALORTOTALDOSERVICO.*?R\$([\d\.,]+)", texto_denso)
+        if not valor_match: valor_match = re.search(r"VALORLIQUIDODANFS-E.*?R\$([\d\.,]+)", texto_denso)
         if not valor_match: valor_match = re.search(r"R\$([\d\.,]+)", texto_denso) # Fallback
         
         if valor_match:
@@ -109,9 +113,10 @@ def call_gemini_api_direct(file_name, file_bytes, model_name, api_key, status_pl
                 data['file_name'] = file_name
                 return data, None
             elif response.status_code == 400:
-                # Agora o erro 400 mostra exatamente o que o Google reclamou
                 err_msg = response.json().get('error', {}).get('message', 'Formato Rejeitado')
                 return None, f"Erro 400 do Google: {err_msg}"
+            elif response.status_code == 404:
+                return None, f"Erro HTTP 404: Modelo '{model_name}' não encontrado. Tente a opção '-latest' na barra lateral."
             elif response.status_code == 429:
                 time.sleep(15 * (attempt + 1))
                 continue
@@ -141,8 +146,8 @@ def gerar_registro_1300(nf, obs=""):
     return f"|1300|{nf.get('data', '')}|55|5|{formatar_valor(nf.get('valor_total', 0))}|1|{obs}|SISTEMA|"
 
 # --- INTERFACE VISUAL ---
-st.set_page_config(page_title="Domínio Automator v8.0", layout="wide")
-st.title("⚡ Domínio Automator - V8.0 (Leitura Densa)")
+st.set_page_config(page_title="Domínio Automator v8.1", layout="wide")
+st.title("⚡ Domínio Automator - V8.1 (Leitura Densa Anti-Acentos)")
 
 with st.sidebar:
     st.header("⚙️ Painel de Controlo")
@@ -158,11 +163,12 @@ with st.sidebar:
     if modo_offline:
         st.success("Técnica de Texto Denso ativada. Processamento em Segundos!")
     else:
-        st.warning("Uso da IA. Lento. Selecione Gemini 1.5 Flash para evitar Erro 400 em PDFs.")
+        st.warning("Uso da IA (Gemini 2.0). Processamento mais lento, mas altamente preciso.")
         api_input = st.text_area("Gemini API Keys", value=DEFAULT_KEY)
         keys_list = [k.strip() for k in api_input.replace(',', '\n').split('\n') if k.strip()]
-        # Alterado para 1.5 Flash como padrão para evitar o erro 400
-        sel_model = st.selectbox("Versão do Gemini", ["gemini-1.5-flash", "gemini-2.0-flash"], index=0)
+        
+        # Atualizado para usar Gemini 2.0 Flash como padrão absoluto
+        sel_model = st.selectbox("Versão do Gemini", ["gemini-2.0-flash", "gemini-1.5-flash"], index=0)
         delay_global = st.slider("Pausa entre notas (IA)", 2, 10, 4)
     
     st.markdown("---")
@@ -267,10 +273,10 @@ with t2:
         st.download_button(
             label=f"📥 Transferir Ficheiro de Importação ({len(st.session_state.notas_finalizadas)} Notas)",
             data=txt_final.encode('latin-1', errors='replace'),
-            file_name=f"lote_dominio_V8_{datetime.now().strftime('%H%M')}.txt",
+            file_name=f"lote_dominio_V8.1_{datetime.now().strftime('%H%M')}.txt",
             mime="text/plain",
             use_container_width=True
         )
 
 st.divider()
-st.caption("v8.0 - Motor Offline com Técnica de Texto Denso.")
+st.caption("v8.1 - Remoção universal de acentos no modo offline para máxima fiabilidade.")
