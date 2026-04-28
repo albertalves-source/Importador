@@ -34,8 +34,13 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
         leitor = PyPDF2.PdfReader(io.BytesIO(file_bytes))
         texto_bruto = ""
         for pagina in leitor.pages:
-            if pagina.extract_text():
-                texto_bruto += pagina.extract_text() + " "
+            extraido = pagina.extract_text()
+            if extraido:
+                texto_bruto += extraido + " "
+                
+        # Detetor de Imagens Escaneadas
+        if len(texto_bruto.strip()) < 50:
+            return None, "PDF é uma imagem escaneada ou ilegível. Utilize o modo de Inteligência Artificial."
                 
         # Transforma o texto numa massa densa sem espaços e em maiúsculas
         texto_denso = re.sub(r'\s+', '', texto_bruto).upper()
@@ -45,11 +50,13 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
         
         dados = {"doc": None, "serie": "1", "data": None, "cnpj_forn": None, "valor_total": None, "aliq_icms": 0.0, "file_name": file_name}
         
-        # 1. NÚMERO DO DOCUMENTO (Proteção contra captura de número do RPS)
+        # 1. NÚMERO DO DOCUMENTO (Dicionário ultra expandido)
         doc_match = re.search(r"NUMERODANFS-E[^\d]*0*(\d+)", texto_denso)
         if not doc_match: doc_match = re.search(r"NUMERODANOTA[^\d]*0*(\d+)", texto_denso)
-        if not doc_match: doc_match = re.search(r"NOTA:[^\d]*0*(\d+)", texto_denso) # Especifico para NOTA: para evitar NOTAFISCAL
+        if not doc_match: doc_match = re.search(r"NOTAFISCAL[^\d]*0*(\d+)", texto_denso)
+        if not doc_match: doc_match = re.search(r"NOTA:[^\d]*0*(\d+)", texto_denso) 
         if not doc_match: doc_match = re.search(r"NFS-E[^\d]*0*(\d+)", texto_denso)
+        if not doc_match: doc_match = re.search(r"NUMERO[^\d]*0*(\d+)", texto_denso) # Fallback final
         if doc_match: dados["doc"] = int(doc_match.group(1))
             
         # 2. DATA
@@ -61,16 +68,23 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
             
         # 3. CNPJ (O primeiro que aparece é sempre o do Emitente)
         cnpjs = re.findall(r"(\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2})", texto_denso)
+        if not cnpjs:
+            # Caso o CNPJ venha sem pontuação nenhuma e colado a texto
+            cnpj_match = re.search(r"CNPJ[^\d]*(\d{14})", texto_denso)
+            if cnpj_match: cnpjs = [cnpj_match.group(1)]
+            
         if cnpjs: dados["cnpj_forn"] = re.sub(r"\D", "", cnpjs[0])
             
-        # 4. VALOR TOTAL (Super flexível e seguro contra valores colados como "0,005.000,00")
-        # Forçamos a regex a apanhar apenas UM formato monetário de cada vez
+        # 4. VALOR TOTAL (Super flexível com novos termos contábeis)
         padroes_valor = [
             r"ALIQUOTA\(\%\)[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})", # Layout específico WebISS Campina Grande
             r"VALORLIQUIDO[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
             r"VALORDOSSERVICOS?[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
             r"VALORTOTALDOSERVICOS?[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
+            r"TOTALDOSSERVICOS?[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
+            r"VALORBRUTO[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
             r"VALORTOTAL[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
+            r"TOTAL[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
             r"R\$[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})" # Fallback final
         ]
         
@@ -101,7 +115,6 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
 # ==========================================
 # MOTOR IA (GEMINI) - FALLBACK COM DETETIVE DE ERROS
 # ==========================================
-# Aviso: A chave antiga foi revogada pelo Google por ter sido exposta no GitHub!
 DEFAULT_KEY = "" 
 
 def call_gemini_api_direct(file_name, file_bytes, model_name, api_key, status_placeholder):
@@ -119,7 +132,6 @@ def call_gemini_api_direct(file_name, file_bytes, model_name, api_key, status_pl
             if response.status_code == 200:
                 resp_json = response.json()
                 
-                # Validação rigorosa da resposta da IA
                 if 'candidates' not in resp_json or not resp_json['candidates']:
                     last_err = "IA não enviou candidatos na resposta (possível bloqueio do PDF)."
                     time.sleep(5)
@@ -151,12 +163,17 @@ def call_gemini_api_direct(file_name, file_bytes, model_name, api_key, status_pl
             elif response.status_code == 404:
                 return None, f"Erro HTTP 404: Modelo '{model_name}' não encontrado. Tente a opção '-latest' na barra lateral."
             elif response.status_code == 429:
-                last_err = f"Limite de requisições excedido (Erro 429) na tentativa {attempt+1}."
-                time.sleep(15 * (attempt + 1))
+                # PAUSA AUMENTADA PARA 20s, 40s, 60s, 80s para perdoar o Rate Limit
+                wait_time = 20 * (attempt + 1)
+                last_err = f"Limite de requisições excedido (Erro 429). Aguardando {wait_time}s..."
+                status_placeholder.warning(f"⏳ Cota atingida! Em pausa obrigatória por {wait_time}s...")
+                time.sleep(wait_time)
                 continue
             elif response.status_code in [500, 503, 504]:
-                last_err = f"Servidores do Google sobrecarregados (Erro {response.status_code}) na tentativa {attempt+1}."
-                time.sleep(10 * (attempt + 1))
+                wait_time = 15 * (attempt + 1)
+                last_err = f"Servidores da Google sobrecarregados (Erro {response.status_code}). Aguardando {wait_time}s..."
+                status_placeholder.warning(f"⏳ Servidores lentos! Em pausa por {wait_time}s...")
+                time.sleep(wait_time)
                 continue
             else:
                 last_err = f"Erro HTTP {response.status_code}"
@@ -187,8 +204,8 @@ def gerar_registro_1300(nf, obs=""):
     return f"|1300|{nf.get('data', '')}|55|5|{formatar_valor(nf.get('valor_total', 0))}|1|{obs}|SISTEMA|"
 
 # --- INTERFACE VISUAL ---
-st.set_page_config(page_title="Domínio Automator v8.3", layout="wide")
-st.title("⚡ Domínio Automator - V8.3 (Motor Extra Forte)")
+st.set_page_config(page_title="Domínio Automator v8.4", layout="wide")
+st.title("⚡ Domínio Automator - V8.4 (Leitura Estendida)")
 
 with st.sidebar:
     st.header("⚙️ Painel de Controlo")
@@ -318,10 +335,10 @@ with t2:
         st.download_button(
             label=f"📥 Transferir Ficheiro de Importação ({len(st.session_state.notas_finalizadas)} Notas)",
             data=txt_final.encode('latin-1', errors='replace'),
-            file_name=f"lote_dominio_V8.3_{datetime.now().strftime('%H%M')}.txt",
+            file_name=f"lote_dominio_V8.4_{datetime.now().strftime('%H%M')}.txt",
             mime="text/plain",
             use_container_width=True
         )
 
 st.divider()
-st.caption("v8.3 - Reforço Absoluto no Motor Offline. A Chave API exposta foi removida por segurança.")
+st.caption("v8.4 - Dicionário Offline Expandido e Detetor de PDFs Escaneados (Imagens).")
