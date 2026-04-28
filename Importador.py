@@ -7,7 +7,7 @@ import time
 import requests
 import re
 import io
-import PyPDF2 # Biblioteca super rápida para ler texto de PDFs
+import PyPDF2 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class JSONParser:
@@ -22,77 +22,74 @@ class JSONParser:
             return texto
 
 # ==========================================
-# MOTOR DE EXTRAÇÃO OFFLINE (CÓDIGO PURO)
+# MOTOR OFFLINE - TÉCNICA DE "TEXTO DENSO"
 # ==========================================
 def extrair_dados_pdf_offline(file_name, file_bytes):
     """
-    Lê o PDF instantaneamente sem usar IA.
-    Configurado para o Padrão Nacional (DANFSe v1.0) e Padrão São Paulo.
+    Lê o PDF de forma indestrutível, removendo todos os espaços para 
+    evitar problemas de formatação da biblioteca PyPDF2.
     """
     try:
-        # Abre o PDF e extrai o texto bruto
         leitor = PyPDF2.PdfReader(io.BytesIO(file_bytes))
-        texto = ""
+        texto_bruto = ""
         for pagina in leitor.pages:
-            texto += pagina.extract_text() + "\n"
-            
-        dados = {
-            "doc": None,
-            "serie": "1",
-            "data": None,
-            "cnpj_forn": None,
-            "valor_total": None,
-            "aliq_icms": 0.0,
-            "file_name": file_name
-        }
-
-        # 1. TENTA LER COMO "PADRÃO SÃO PAULO CAPITAL"
-        if "PREFEITURA DO MUNICÍPIO DE SÃO PAULO" in texto or "SECRETARIA MUNICIPAL DA FAZENDA" in texto:
-            doc_match = re.search(r"Número da Nota[\s\n]+(\d+)", texto)
-            data_match = re.search(r"Data e Hora de Emissão[\s\n]+(\d{2}/\d{2}/\d{4})", texto)
-            cnpj_match = re.search(r"PRESTADOR DE SERVIÇOS.*?CPF/CNPJ:\s*([\d\.\-\/]+)", texto, re.DOTALL)
-            valor_match = re.search(r"VALOR TOTAL DO SERVIÇO\s*=\s*R\$\s*([\d\.,]+)", texto)
-            
-            if doc_match: dados["doc"] = int(doc_match.group(1)) # Remove zeros à esquerda
-            if data_match: dados["data"] = data_match.group(1)
-            if cnpj_match: dados["cnpj_forn"] = re.sub(r"\D", "", cnpj_match.group(1))
-            if valor_match:
-                v_str = valor_match.group(1).replace('.', '').replace(',', '.')
-                dados["valor_total"] = float(v_str)
-
-        # 2. TENTA LER COMO "PADRÃO NACIONAL (DANFSe v1.0)"
-        elif "DANFSe v1.0" in texto or "Documento Auxiliar da NFS-e" in texto:
-            doc_match = re.search(r"Número da NFS-e[\s\n]+(\d+)", texto)
-            data_match = re.search(r"Competência da NFS-e[\s\n]+(\d{2}/\d{2}/\d{4})", texto)
-            if not data_match:
-                data_match = re.search(r"Data e Hora da emissão.*?[\s\n]+(\d{2}/\d{2}/\d{4})", texto)
-            
-            # Procura CNPJ apenas do Emitente/Prestador
-            cnpj_match = re.search(r"EMITENTE DA NFS-e.*?CNPJ/CPF/NIF[\s\n]+([\d\.\-\/]+)", texto, re.DOTALL)
-            
-            # Valor do Serviço
-            valor_match = re.search(r"Valor do Serviço[\s\n]+R\$\s*([\d\.,]+)", texto)
-            if not valor_match:
-                valor_match = re.search(r"Valor Líquido da NFS-e[\s\n]+R\$\s*([\d\.,]+)", texto)
+            if pagina.extract_text():
+                texto_bruto += pagina.extract_text() + " "
                 
-            if doc_match: dados["doc"] = int(doc_match.group(1))
-            if data_match: dados["data"] = data_match.group(1)
-            if cnpj_match: dados["cnpj_forn"] = re.sub(r"\D", "", cnpj_match.group(1))
-            if valor_match: 
-                v_str = valor_match.group(1).replace('.', '').replace(',', '.')
-                dados["valor_total"] = float(v_str)
-
-        # VALIDAÇÃO FINAL
+        # Transforma o texto numa massa densa sem espaços e em maiúsculas
+        texto_denso = re.sub(r'\s+', '', texto_bruto).upper()
+        
+        dados = {"doc": None, "serie": "1", "data": None, "cnpj_forn": None, "valor_total": None, "aliq_icms": 0.0, "file_name": file_name}
+        
+        # 1. NÚMERO DO DOCUMENTO
+        doc_match = re.search(r"NÚMERODANFS-E0*(\d+)", texto_denso)
+        if not doc_match: doc_match = re.search(r"NÚMERODANOTA0*(\d+)", texto_denso)
+        if not doc_match: doc_match = re.search(r"NFS-E0*(\d+)", texto_denso)
+        if doc_match: dados["doc"] = int(doc_match.group(1))
+            
+        # 2. DATA
+        data_match = re.search(r"COMPETÊNCIADANFS-E(\d{2}/\d{2}/\d{4})", texto_denso)
+        if not data_match: data_match = re.search(r"EMISSÃO(\d{2}/\d{2}/\d{4})", texto_denso)
+        if not data_match: data_match = re.search(r"(\d{2}/\d{2}/\d{4})", texto_denso) # Pega a primeira data que aparecer
+        if data_match: dados["data"] = data_match.group(1)
+            
+        # 3. CNPJ (O primeiro que aparece é sempre o do Emitente)
+        cnpjs = re.findall(r"(\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})", texto_denso)
+        if cnpjs: dados["cnpj_forn"] = re.sub(r"\D", "", cnpjs[0])
+            
+        # 4. VALOR TOTAL (Procura em múltiplos locais possíveis)
+        valor_match = re.search(r"VALORDOSERVIÇOR\$([\d\.,]+)", texto_denso)
+        if not valor_match: valor_match = re.search(r"VALORTOTALDOSERVIÇO=R\$([\d\.,]+)", texto_denso)
+        if not valor_match: valor_match = re.search(r"VALORLÍQUIDODANFS-ER\$([\d\.,]+)", texto_denso)
+        if not valor_match: valor_match = re.search(r"R\$([\d\.,]+)", texto_denso) # Fallback
+        
+        if valor_match:
+            v_raw = valor_match.group(1)
+            # Lógica segura para converter a moeda brasileira para decimal (Python)
+            if ',' in v_raw:
+                v_str = v_raw.replace('.', '').replace(',', '.')
+            else:
+                if v_raw.count('.') >= 1:
+                    partes = v_raw.rsplit('.', 1)
+                    if len(partes[1]) == 2:
+                        v_str = partes[0].replace('.', '') + '.' + partes[1]
+                    else:
+                        v_str = v_raw.replace('.', '')
+                else:
+                    v_str = v_raw
+            dados["valor_total"] = float(v_str)
+            
+        # Validação final
         if dados["doc"] and dados["cnpj_forn"] and dados["valor_total"] is not None:
             return dados, None
         else:
-            return None, "Layout do PDF desconhecido ou não suportado no modo offline."
+            return None, f"Leitura Incompleta -> Doc:{dados['doc']} | CNPJ:{dados['cnpj_forn']} | R$:{dados['valor_total']}"
             
     except Exception as e:
-        return None, f"Erro ao ler PDF offline: {str(e)}"
+        return None, f"Erro no Motor Offline: {str(e)}"
 
 # ==========================================
-# MOTOR DE EXTRAÇÃO IA (GEMINI) - FALLBACK
+# MOTOR IA (GEMINI) - FALLBACK CORRIGIDO
 # ==========================================
 DEFAULT_KEY = "AIzaSyB_mDR97ABexRXVSUQkxd_bgYjL_xHKaw8"
 
@@ -100,10 +97,8 @@ def call_gemini_api_direct(file_name, file_bytes, model_name, api_key, status_pl
     if not api_key: return None, "Chave de API ausente."
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key.strip()}"
     base64_data = base64.b64encode(file_bytes).decode('utf-8')
-    prompt = """
-    Extraia os dados desta Nota Fiscal de Serviço (NFS-e). Responda APENAS com um objeto JSON válido.
-    Campos exatos: {"doc": 162, "serie": "1", "data": "01/03/2026", "cnpj_forn": "14243715000180", "valor_total": 16018.50, "aliq_icms": 0.0}
-    """
+    prompt = """Extraia os dados desta Nota Fiscal de Serviço. Responda APENAS com um objeto JSON válido.
+    Campos exatos: {"doc": 162, "serie": "1", "data": "01/03/2026", "cnpj_forn": "14243715000180", "valor_total": 16018.50, "aliq_icms": 0.0}"""
     payload = {"contents": [{"parts": [{"text": prompt}, {"inlineData": {"mimeType": "application/pdf", "data": base64_data}}]}]}
     
     for attempt in range(4):
@@ -113,6 +108,10 @@ def call_gemini_api_direct(file_name, file_bytes, model_name, api_key, status_pl
                 data = json.loads(JSONParser.extrair_json_puro(response.json()['candidates'][0]['content']['parts'][0]['text']))
                 data['file_name'] = file_name
                 return data, None
+            elif response.status_code == 400:
+                # Agora o erro 400 mostra exatamente o que o Google reclamou
+                err_msg = response.json().get('error', {}).get('message', 'Formato Rejeitado')
+                return None, f"Erro 400 do Google: {err_msg}"
             elif response.status_code == 429:
                 time.sleep(15 * (attempt + 1))
                 continue
@@ -120,10 +119,10 @@ def call_gemini_api_direct(file_name, file_bytes, model_name, api_key, status_pl
                 time.sleep(10 * (attempt + 1))
                 continue
             else:
-                return None, f"Erro API: {response.status_code}"
+                return None, f"Erro HTTP {response.status_code}"
         except Exception as e:
             time.sleep(5)
-    return None, "Desistência após falhas de IA."
+    return None, "Desistência após falhas da IA."
 
 # --- FUNÇÕES DO DOMÍNIO SISTEMAS ---
 def limpar_cnpj(valor): return "".join(filter(str.isdigit, str(valor or "")))
@@ -142,8 +141,8 @@ def gerar_registro_1300(nf, obs=""):
     return f"|1300|{nf.get('data', '')}|55|5|{formatar_valor(nf.get('valor_total', 0))}|1|{obs}|SISTEMA|"
 
 # --- INTERFACE VISUAL ---
-st.set_page_config(page_title="Domínio Automator v7.0", layout="wide")
-st.title("⚡ Domínio Automator - V7.0 (Híbrido)")
+st.set_page_config(page_title="Domínio Automator v8.0", layout="wide")
+st.title("⚡ Domínio Automator - V8.0 (Leitura Densa)")
 
 with st.sidebar:
     st.header("⚙️ Painel de Controlo")
@@ -157,12 +156,13 @@ with st.sidebar:
     modo_offline = "RELÂMPAGO" in metodo
     
     if modo_offline:
-        st.success("O sistema vai usar Código Puro. Processa centenas de notas em poucos segundos! Não consome internet.")
+        st.success("Técnica de Texto Denso ativada. Processamento em Segundos!")
     else:
-        st.warning("Uso da IA do Google. Mais tolerante a layouts estranhos, mas muito mais lento.")
+        st.warning("Uso da IA. Lento. Selecione Gemini 1.5 Flash para evitar Erro 400 em PDFs.")
         api_input = st.text_area("Gemini API Keys", value=DEFAULT_KEY)
         keys_list = [k.strip() for k in api_input.replace(',', '\n').split('\n') if k.strip()]
-        sel_model = st.selectbox("Versão do Gemini", ["gemini-2.0-flash", "gemini-1.5-flash"], index=0)
+        # Alterado para 1.5 Flash como padrão para evitar o erro 400
+        sel_model = st.selectbox("Versão do Gemini", ["gemini-1.5-flash", "gemini-2.0-flash"], index=0)
         delay_global = st.slider("Pausa entre notas (IA)", 2, 10, 4)
     
     st.markdown("---")
@@ -201,17 +201,13 @@ with t1:
             pbar = st.progress(0)
             status_msg = st.empty()
             
-            # PREPARAÇÃO DOS BYTES
             tarefas = []
             for f in pendentes:
                 f.seek(0)
                 tarefas.append((f.name, f.read()))
             
-            # ==========================================
-            # EXECUÇÃO MODO OFFLINE (SEGUNDOS)
-            # ==========================================
             if modo_offline:
-                status_msg.info("⚡ A ler as notas na velocidade da luz...")
+                status_msg.info("⚡ A ler as notas através de código puro...")
                 inicio = time.time()
                 for f_name, f_bytes in tarefas:
                     if st.session_state.parar: break
@@ -226,11 +222,8 @@ with t1:
                     pbar.progress(len(st.session_state.notas_finalizadas) / total_arquivos)
                 
                 tempo_total = round(time.time() - inicio, 2)
-                status_msg.success(f"🎉 Leitura Concluída em incríveis {tempo_total} segundos!")
+                status_msg.success(f"🎉 Leitura Concluída em {tempo_total} segundos!")
             
-            # ==========================================
-            # EXECUÇÃO MODO IA LENTO (MINUTOS)
-            # ==========================================
             else:
                 key_index = 0
                 for idx, (f_name, f_bytes) in enumerate(tarefas):
@@ -274,10 +267,10 @@ with t2:
         st.download_button(
             label=f"📥 Transferir Ficheiro de Importação ({len(st.session_state.notas_finalizadas)} Notas)",
             data=txt_final.encode('latin-1', errors='replace'),
-            file_name=f"lote_dominio_FAST_{datetime.now().strftime('%H%M')}.txt",
+            file_name=f"lote_dominio_V8_{datetime.now().strftime('%H%M')}.txt",
             mime="text/plain",
             use_container_width=True
         )
 
 st.divider()
-st.caption("v7.0 - Integração de Motor de Extração Offline de Altíssima Velocidade.")
+st.caption("v8.0 - Motor Offline com Técnica de Texto Denso.")
