@@ -50,13 +50,12 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
         
         dados = {"doc": None, "serie": "1", "data": None, "cnpj_forn": None, "valor_total": None, "aliq_icms": 0.0, "file_name": file_name}
         
-        # 1. NÚMERO DO DOCUMENTO (Dicionário ultra expandido)
-        doc_match = re.search(r"NUMERODANFS-E[^\d]*0*(\d+)", texto_denso)
-        if not doc_match: doc_match = re.search(r"NUMERODANOTA[^\d]*0*(\d+)", texto_denso)
-        if not doc_match: doc_match = re.search(r"NOTAFISCAL[^\d]*0*(\d+)", texto_denso)
-        if not doc_match: doc_match = re.search(r"NOTA:[^\d]*0*(\d+)", texto_denso) 
-        if not doc_match: doc_match = re.search(r"NFS-E[^\d]*0*(\d+)", texto_denso)
-        if not doc_match: doc_match = re.search(r"NUMERO[^\d]*0*(\d+)", texto_denso) # Fallback final
+        # 1. NÚMERO DO DOCUMENTO (Blindado contra Falsos Positivos do Título)
+        doc_match = re.search(r"NUMERODANFS-E[^\d]{0,15}0*(\d+)", texto_denso)
+        if not doc_match: doc_match = re.search(r"NUMERODANOTA[^\d]{0,15}0*(\d+)", texto_denso)
+        if not doc_match: doc_match = re.search(r"NOTA:[^\d]{0,15}0*(\d+)", texto_denso) 
+        if not doc_match: doc_match = re.search(r"NFS-E[^\d]{0,15}0*(\d+)", texto_denso)
+        if not doc_match: doc_match = re.search(r"NUMERO[^\d]{0,15}0*(\d+)", texto_denso) # Fallback final
         if doc_match: dados["doc"] = int(doc_match.group(1))
             
         # 2. DATA
@@ -69,23 +68,22 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
         # 3. CNPJ (O primeiro que aparece é sempre o do Emitente)
         cnpjs = re.findall(r"(\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2})", texto_denso)
         if not cnpjs:
-            # Caso o CNPJ venha sem pontuação nenhuma e colado a texto
             cnpj_match = re.search(r"CNPJ[^\d]*(\d{14})", texto_denso)
             if cnpj_match: cnpjs = [cnpj_match.group(1)]
             
         if cnpjs: dados["cnpj_forn"] = re.sub(r"\D", "", cnpjs[0])
             
-        # 4. VALOR TOTAL (Super flexível com novos termos contábeis)
+        # 4. VALOR TOTAL (Super flexível: aceita 40.000,00 ou 40000,00)
         padroes_valor = [
-            r"ALIQUOTA\(\%\)[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})", # Layout específico WebISS Campina Grande
-            r"VALORLIQUIDO[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
-            r"VALORDOSSERVICOS?[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
-            r"VALORTOTALDOSERVICOS?[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
-            r"TOTALDOSSERVICOS?[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
-            r"VALORBRUTO[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
-            r"VALORTOTAL[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
-            r"TOTAL[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})",
-            r"R\$[^\d]*(\d{1,3}(?:\.\d{3})*,\d{2})" # Fallback final
+            r"ALIQUOTA[^\d]{0,15}(\d+(?:[.,]\d{3})*[.,]\d{2})", 
+            r"VALORLIQUIDO[^\d]{0,15}(\d+(?:[.,]\d{3})*[.,]\d{2})",
+            r"VALORDOS?SERVICOS?[^\d]{0,15}(\d+(?:[.,]\d{3})*[.,]\d{2})",
+            r"VALORTOTALDOS?SERVICOS?[^\d]{0,15}(\d+(?:[.,]\d{3})*[.,]\d{2})",
+            r"TOTALDOS?SERVICOS?[^\d]{0,15}(\d+(?:[.,]\d{3})*[.,]\d{2})",
+            r"VALORBRUTO[^\d]{0,15}(\d+(?:[.,]\d{3})*[.,]\d{2})",
+            r"VALORTOTAL[^\d]{0,15}(\d+(?:[.,]\d{3})*[.,]\d{2})",
+            r"TOTAL[^\d]{0,15}(\d+(?:[.,]\d{3})*[.,]\d{2})",
+            r"R\$[^\d]{0,15}(\d+(?:[.,]\d{3})*[.,]\d{2})" 
         ]
         
         v_raw = None
@@ -93,14 +91,16 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
             match = re.search(padrao, texto_denso)
             if match:
                 val = match.group(1)
-                # Rejeita o valor se for o desconto de 0,00 que aparece antes do valor líquido
                 if val not in ["0,00", "0.00"]: 
                     v_raw = val
                     break
         
-        # Conversão segura do valor formatado em texto para Decimal
+        # Conversão Matemática Blindada
         if v_raw:
-            v_str = v_raw.replace('.', '').replace(',', '.')
+            if len(v_raw) > 3 and v_raw[-3] in [',', '.']:
+                v_str = re.sub(r'[.,]', '', v_raw[:-3]) + '.' + v_raw[-2:]
+            else:
+                v_str = re.sub(r'[.,]', '', v_raw)
             dados["valor_total"] = float(v_str)
             
         # Validação final robusta
@@ -163,7 +163,6 @@ def call_gemini_api_direct(file_name, file_bytes, model_name, api_key, status_pl
             elif response.status_code == 404:
                 return None, f"Erro HTTP 404: Modelo '{model_name}' não encontrado. Tente a opção '-latest' na barra lateral."
             elif response.status_code == 429:
-                # PAUSA AUMENTADA PARA 20s, 40s, 60s, 80s para perdoar o Rate Limit
                 wait_time = 20 * (attempt + 1)
                 last_err = f"Limite de requisições excedido (Erro 429). Aguardando {wait_time}s..."
                 status_placeholder.warning(f"⏳ Cota atingida! Em pausa obrigatória por {wait_time}s...")
@@ -185,7 +184,7 @@ def call_gemini_api_direct(file_name, file_bytes, model_name, api_key, status_pl
             last_err = f"Exceção técnica: {str(e)}"
             time.sleep(5)
             
-    return None, f"Desistência após falhas da IA. Último erro interno: {last_err}"
+    return None, f"Falha na IA. Último erro: {last_err} (Dica: Se esgotou as 4 tentativas, a sua Chave atingiu o limite DIÁRIO de 1500 notas. Tente novamente amanhã)."
 
 # --- FUNÇÕES DO DOMÍNIO SISTEMAS ---
 def limpar_cnpj(valor): return "".join(filter(str.isdigit, str(valor or "")))
@@ -204,8 +203,8 @@ def gerar_registro_1300(nf, obs=""):
     return f"|1300|{nf.get('data', '')}|55|5|{formatar_valor(nf.get('valor_total', 0))}|1|{obs}|SISTEMA|"
 
 # --- INTERFACE VISUAL ---
-st.set_page_config(page_title="Domínio Automator v8.4", layout="wide")
-st.title("⚡ Domínio Automator - V8.4 (Leitura Estendida)")
+st.set_page_config(page_title="Domínio Automator v8.5", layout="wide")
+st.title("⚡ Domínio Automator - V8.5 (Blindagem Máxima)")
 
 with st.sidebar:
     st.header("⚙️ Painel de Controlo")
@@ -335,10 +334,10 @@ with t2:
         st.download_button(
             label=f"📥 Transferir Ficheiro de Importação ({len(st.session_state.notas_finalizadas)} Notas)",
             data=txt_final.encode('latin-1', errors='replace'),
-            file_name=f"lote_dominio_V8.4_{datetime.now().strftime('%H%M')}.txt",
+            file_name=f"lote_dominio_V8.5_{datetime.now().strftime('%H%M')}.txt",
             mime="text/plain",
             use_container_width=True
         )
 
 st.divider()
-st.caption("v8.4 - Dicionário Offline Expandido e Detetor de PDFs Escaneados (Imagens).")
+st.caption("v8.5 - Blindagem Máxima do Motor Matemático Offline.")
