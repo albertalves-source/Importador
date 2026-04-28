@@ -45,27 +45,28 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
         
         dados = {"doc": None, "serie": "1", "data": None, "cnpj_forn": None, "valor_total": None, "aliq_icms": 0.0, "file_name": file_name}
         
-        # 1. NÚMERO DO DOCUMENTO
-        doc_match = re.search(r"NUMERODANFS-E0*(\d+)", texto_denso)
-        if not doc_match: doc_match = re.search(r"NUMERODANOTA0*(\d+)", texto_denso)
-        if not doc_match: doc_match = re.search(r"NFS-E0*(\d+)", texto_denso)
+        # 1. NÚMERO DO DOCUMENTO (Super flexível ignorando lixo entre a palavra e o número)
+        doc_match = re.search(r"NUMERODANFS-E[^\d]*0*(\d+)", texto_denso)
+        if not doc_match: doc_match = re.search(r"NUMERODANOTA[^\d]*0*(\d+)", texto_denso)
+        if not doc_match: doc_match = re.search(r"NFS-E[^\d]*0*(\d+)", texto_denso)
         if doc_match: dados["doc"] = int(doc_match.group(1))
             
         # 2. DATA
-        data_match = re.search(r"COMPETENCIADANFS-E(\d{2}/\d{2}/\d{4})", texto_denso)
-        if not data_match: data_match = re.search(r"EMISSAO(\d{2}/\d{2}/\d{4})", texto_denso)
+        data_match = re.search(r"COMPETENCIADANFS-E[^\d]*(\d{2}/\d{2}/\d{4})", texto_denso)
+        if not data_match: data_match = re.search(r"EMISSAO[^\d]*(\d{2}/\d{2}/\d{4})", texto_denso)
         if not data_match: data_match = re.search(r"(\d{2}/\d{2}/\d{4})", texto_denso) # Pega a primeira data que aparecer
         if data_match: dados["data"] = data_match.group(1)
             
         # 3. CNPJ (O primeiro que aparece é sempre o do Emitente)
-        cnpjs = re.findall(r"(\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})", texto_denso)
+        cnpjs = re.findall(r"(\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2})", texto_denso)
         if cnpjs: dados["cnpj_forn"] = re.sub(r"\D", "", cnpjs[0])
             
-        # 4. VALOR TOTAL (Procura em múltiplos locais possíveis)
-        valor_match = re.search(r"VALORDOSERVICO.*?R\$([\d\.,]+)", texto_denso)
-        if not valor_match: valor_match = re.search(r"VALORTOTALDOSERVICO.*?R\$([\d\.,]+)", texto_denso)
-        if not valor_match: valor_match = re.search(r"VALORLIQUIDODANFS-E.*?R\$([\d\.,]+)", texto_denso)
-        if not valor_match: valor_match = re.search(r"R\$([\d\.,]+)", texto_denso) # Fallback
+        # 4. VALOR TOTAL (Super flexível para não depender de R$ exatos)
+        valor_match = re.search(r"VALORDOSERVICO[^\d]*([\d\.,]+)", texto_denso)
+        if not valor_match: valor_match = re.search(r"VALORTOTALDOSERVICO[^\d]*([\d\.,]+)", texto_denso)
+        if not valor_match: valor_match = re.search(r"VALORLIQUIDODANFS-E[^\d]*([\d\.,]+)", texto_denso)
+        if not valor_match: valor_match = re.search(r"VALORTOTAL[^\d]*([\d\.,]+)", texto_denso)
+        if not valor_match: valor_match = re.search(r"R\$[^\d]*([\d\.,]+)", texto_denso) # Fallback
         
         if valor_match:
             v_raw = valor_match.group(1)
@@ -93,7 +94,7 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
         return None, f"Erro no Motor Offline: {str(e)}"
 
 # ==========================================
-# MOTOR IA (GEMINI) - FALLBACK CORRIGIDO
+# MOTOR IA (GEMINI) - FALLBACK COM DETETIVE DE ERROS
 # ==========================================
 DEFAULT_KEY = "AIzaSyB_mDR97ABexRXVSUQkxd_bgYjL_xHKaw8"
 
@@ -105,13 +106,37 @@ def call_gemini_api_direct(file_name, file_bytes, model_name, api_key, status_pl
     Campos exatos: {"doc": 162, "serie": "1", "data": "01/03/2026", "cnpj_forn": "14243715000180", "valor_total": 16018.50, "aliq_icms": 0.0}"""
     payload = {"contents": [{"parts": [{"text": prompt}, {"inlineData": {"mimeType": "application/pdf", "data": base64_data}}]}]}
     
+    last_err = "Nenhum erro reportado."
     for attempt in range(4):
         try:
             response = requests.post(url, json=payload, timeout=120)
             if response.status_code == 200:
-                data = json.loads(JSONParser.extrair_json_puro(response.json()['candidates'][0]['content']['parts'][0]['text']))
+                resp_json = response.json()
+                
+                # Validação rigorosa da resposta da IA
+                if 'candidates' not in resp_json or not resp_json['candidates']:
+                    last_err = "IA não enviou candidatos na resposta (possível bloqueio do PDF)."
+                    time.sleep(5)
+                    continue
+                    
+                parts = resp_json['candidates'][0].get('content', {}).get('parts', [])
+                if not parts:
+                    last_err = "Resposta da IA sem texto."
+                    time.sleep(5)
+                    continue
+                    
+                raw_text = parts[0].get('text', '')
+                json_str = JSONParser.extrair_json_puro(raw_text)
+                
+                if not json_str:
+                    last_err = "JSON não encontrado no texto da IA."
+                    time.sleep(5)
+                    continue
+                    
+                data = json.loads(json_str)
                 data['file_name'] = file_name
                 return data, None
+                
             elif response.status_code == 400:
                 err_msg = response.json().get('error', {}).get('message', 'Formato Rejeitado')
                 return None, f"Erro 400 do Google: {err_msg}"
@@ -124,10 +149,16 @@ def call_gemini_api_direct(file_name, file_bytes, model_name, api_key, status_pl
                 time.sleep(10 * (attempt + 1))
                 continue
             else:
-                return None, f"Erro HTTP {response.status_code}"
-        except Exception as e:
+                last_err = f"Erro HTTP {response.status_code}"
+                time.sleep(5)
+        except json.JSONDecodeError as e:
+            last_err = f"Falha ao interpretar JSON: {str(e)}"
             time.sleep(5)
-    return None, "Desistência após falhas da IA."
+        except Exception as e:
+            last_err = f"Exceção técnica: {str(e)}"
+            time.sleep(5)
+            
+    return None, f"Desistência após falhas da IA. Último erro interno: {last_err}"
 
 # --- FUNÇÕES DO DOMÍNIO SISTEMAS ---
 def limpar_cnpj(valor): return "".join(filter(str.isdigit, str(valor or "")))
@@ -146,8 +177,8 @@ def gerar_registro_1300(nf, obs=""):
     return f"|1300|{nf.get('data', '')}|55|5|{formatar_valor(nf.get('valor_total', 0))}|1|{obs}|SISTEMA|"
 
 # --- INTERFACE VISUAL ---
-st.set_page_config(page_title="Domínio Automator v8.1", layout="wide")
-st.title("⚡ Domínio Automator - V8.1 (Leitura Densa Anti-Acentos)")
+st.set_page_config(page_title="Domínio Automator v8.2", layout="wide")
+st.title("⚡ Domínio Automator - V8.2 (Motor Extra Forte)")
 
 with st.sidebar:
     st.header("⚙️ Painel de Controlo")
@@ -273,10 +304,10 @@ with t2:
         st.download_button(
             label=f"📥 Transferir Ficheiro de Importação ({len(st.session_state.notas_finalizadas)} Notas)",
             data=txt_final.encode('latin-1', errors='replace'),
-            file_name=f"lote_dominio_V8.1_{datetime.now().strftime('%H%M')}.txt",
+            file_name=f"lote_dominio_V8.2_{datetime.now().strftime('%H%M')}.txt",
             mime="text/plain",
             use_container_width=True
         )
 
 st.divider()
-st.caption("v8.1 - Remoção universal de acentos no modo offline para máxima fiabilidade.")
+st.caption("v8.2 - Algoritmos de busca extra-flexíveis (Expressões Regulares) para o Modo Relâmpago.")
