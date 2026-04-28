@@ -23,7 +23,7 @@ class JSONParser:
             return texto
 
 # ==========================================
-# MOTOR OFFLINE - TÉCNICA DE "TEXTO DENSO"
+# MOTOR OFFLINE - TÉCNICA DE "TEXTO DENSO E LIMPO"
 # ==========================================
 def extrair_dados_pdf_offline(file_name, file_bytes):
     """
@@ -41,22 +41,55 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
         # Detetor de Imagens Escaneadas
         if len(texto_bruto.strip()) < 50:
             return None, "PDF é uma imagem escaneada ou ilegível. Utilize o modo de Inteligência Artificial."
-                
-        # Transforma o texto numa massa densa sem espaços e em maiúsculas
-        texto_denso = re.sub(r'\s+', '', texto_bruto).upper()
-        
-        # Remove acentos (Ex: NÚMERO -> NUMERO, LÍQUIDO -> LIQUIDO)
-        texto_denso = ''.join(c for c in unicodedata.normalize('NFD', texto_denso) if unicodedata.category(c) != 'Mn')
+            
+        # Criação do TEXTO LIMPO (com espaços, mas sem acentos) para buscas isoladas
+        texto_limpo = re.sub(r'\s+', ' ', texto_bruto).upper()
+        texto_limpo = ''.join(c for c in unicodedata.normalize('NFD', texto_limpo) if unicodedata.category(c) != 'Mn')
+
+        # Criação do TEXTO DENSO (sem espaços) para buscas imunes a falhas de coluna
+        texto_denso = texto_limpo.replace(' ', '')
         
         dados = {"doc": None, "serie": "1", "data": None, "cnpj_forn": None, "valor_total": None, "aliq_icms": 0.0, "file_name": file_name}
         
-        # 1. NÚMERO DO DOCUMENTO (Blindado contra Falsos Positivos do Título)
-        doc_match = re.search(r"NUMERODANFS-E[^\d]{0,15}0*(\d+)", texto_denso)
-        if not doc_match: doc_match = re.search(r"NUMERODANOTA[^\d]{0,15}0*(\d+)", texto_denso)
-        if not doc_match: doc_match = re.search(r"NOTA:[^\d]{0,15}0*(\d+)", texto_denso) 
-        if not doc_match: doc_match = re.search(r"NFS-E[^\d]{0,15}0*(\d+)", texto_denso)
-        if not doc_match: doc_match = re.search(r"NUMERO[^\d]{0,15}0*(\d+)", texto_denso) # Fallback final
-        if doc_match: dados["doc"] = int(doc_match.group(1))
+        # 1. NÚMERO DO DOCUMENTO
+        doc_str = None
+        
+        # Tentativa 1: Busca no texto limpo (Ignora captura de datas usando negative lookahead (?!\/) )
+        for padrao in [
+            r"NUMERO DA NFS-E[^\d]{0,10}0*(\d+)(?!\/)",
+            r"NUMERO DA NOTA[^\d]{0,10}0*(\d+)(?!\/)",
+            r"NOTA FISCAL[^\d]{0,10}0*(\d+)(?!\/)",
+            r"NOTA:[^\d]{0,10}0*(\d+)(?!\/)",
+            r"NFS-E[^\d]{0,10}0*(\d+)(?!\/)",
+            r"NUMERO[^\d]{0,10}0*(\d+)(?!\/)"
+        ]:
+            matches = re.findall(padrao, texto_limpo)
+            valid_matches = [m for m in matches if len(m) < 12] # Filtro de segurança extra
+            if valid_matches:
+                doc_str = valid_matches[0]
+                break
+                
+        # Tentativa 2: Busca no texto denso se a tentativa 1 falhou
+        if not doc_str:
+            for padrao in [
+                r"NUMERODANFS-E[^\d]{0,15}0*(\d+)(?!\/)",
+                r"NUMERODANOTA[^\d]{0,15}0*(\d+)(?!\/)",
+                r"NOTA:[^\d]{0,15}0*(\d+)(?!\/)"
+            ]:
+                matches = re.findall(padrao, texto_denso)
+                valid_matches = [m for m in matches if len(m) < 12]
+                if valid_matches:
+                    doc_str = valid_matches[0]
+                    break
+
+        # Tentativa 3: Padrão Ginfes/Guarulhos (Número isolado que aparece antes de um código de verificação de 9 dígitos)
+        if not doc_str:
+            ginfes_match = re.search(r"\b(\d+)\s+[A-Z0-9]{9}\b", texto_limpo)
+            if ginfes_match:
+                doc_str = ginfes_match.group(1)
+                
+        if doc_str:
+            dados["doc"] = int(doc_str)
             
         # 2. DATA
         data_match = re.search(r"COMPETENCIADANFS-E[^\d]*(\d{2}/\d{2}/\d{4})", texto_denso)
@@ -73,7 +106,7 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
             
         if cnpjs: dados["cnpj_forn"] = re.sub(r"\D", "", cnpjs[0])
             
-        # 4. VALOR TOTAL (Super flexível: aceita 40.000,00 ou 40000,00)
+        # 4. VALOR TOTAL (Super flexível: Encontra todas as matches e ignora ativamente "0,00" ou "0.00")
         padroes_valor = [
             r"ALIQUOTA[^\d]{0,15}(\d+(?:[.,]\d{3})*[.,]\d{2})", 
             r"VALORLIQUIDO[^\d]{0,15}(\d+(?:[.,]\d{3})*[.,]\d{2})",
@@ -88,12 +121,12 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
         
         v_raw = None
         for padrao in padroes_valor:
-            match = re.search(padrao, texto_denso)
-            if match:
-                val = match.group(1)
+            matches = re.findall(padrao, texto_denso)
+            for val in matches:
                 if val not in ["0,00", "0.00"]: 
                     v_raw = val
                     break
+            if v_raw: break
         
         # Conversão Matemática Blindada
         if v_raw:
@@ -203,8 +236,8 @@ def gerar_registro_1300(nf, obs=""):
     return f"|1300|{nf.get('data', '')}|55|5|{formatar_valor(nf.get('valor_total', 0))}|1|{obs}|SISTEMA|"
 
 # --- INTERFACE VISUAL ---
-st.set_page_config(page_title="Domínio Automator v8.5", layout="wide")
-st.title("⚡ Domínio Automator - V8.5 (Blindagem Máxima)")
+st.set_page_config(page_title="Domínio Automator v8.6", layout="wide")
+st.title("⚡ Domínio Automator - V8.6 (Blindagem Máxima)")
 
 with st.sidebar:
     st.header("⚙️ Painel de Controlo")
@@ -334,10 +367,10 @@ with t2:
         st.download_button(
             label=f"📥 Transferir Ficheiro de Importação ({len(st.session_state.notas_finalizadas)} Notas)",
             data=txt_final.encode('latin-1', errors='replace'),
-            file_name=f"lote_dominio_V8.5_{datetime.now().strftime('%H%M')}.txt",
+            file_name=f"lote_dominio_V8.6_{datetime.now().strftime('%H%M')}.txt",
             mime="text/plain",
             use_container_width=True
         )
 
 st.divider()
-st.caption("v8.5 - Blindagem Máxima do Motor Matemático Offline.")
+st.caption("v8.6 - Algoritmos anti-data e anti-zero implementados no Modo Offline.")
