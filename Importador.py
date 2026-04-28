@@ -23,12 +23,12 @@ class JSONParser:
             return texto
 
 # ==========================================
-# MOTOR OFFLINE - TÉCNICA DE BUSCA ESPACIAL
+# MOTOR OFFLINE - TÉCNICA DE BUSCA ESPACIAL E SUPREMA
 # ==========================================
 def extrair_dados_pdf_offline(file_name, file_bytes):
     """
-    Lê o PDF com precisão máxima. Usa o Texto Denso para evitar falhas de formatação 
-    e o Texto Limpo como plano B para layouts muito específicos (Guarulhos/Betim).
+    Lê o PDF com precisão máxima. Usa o Texto Denso para evitar falhas de formatação, 
+    Texto Limpo para layouts específicos e lógica matemática para valores embaralhados.
     """
     try:
         leitor = PyPDF2.PdfReader(io.BytesIO(file_bytes))
@@ -46,7 +46,7 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
         texto_limpo = re.sub(r'\s+', ' ', texto_bruto).upper()
         texto_limpo = ''.join(c for c in unicodedata.normalize('NFD', texto_limpo) if unicodedata.category(c) != 'Mn')
         
-        # TEXTO DENSO: A grande arma. Remove espaços para unir letras separadas por colunas.
+        # TEXTO DENSO: Remove espaços para unir letras separadas por colunas.
         texto_denso = texto_limpo.replace(' ', '')
         
         dados = {"doc": None, "serie": "1", "data": None, "cnpj_forn": None, "valor_total": None, "aliq_icms": 0.0, "file_name": file_name}
@@ -73,9 +73,10 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
                     break
             if doc_str: break
             
-        # Padrão GINFES / Guarulhos (Usa texto limpo para ver os espaços entre o número e o código)
+        # Padrão GINFES / Guarulhos (Protegido contra palavras de 9 letras como MUNICIPIO)
         if not doc_str:
-            ginfes_match = re.search(r"(?<!/)\b(\d+)\b\s+[A-Z0-9]{9}\b", texto_limpo)
+            # A regex agora exige que os 9 caracteres não sejam compostos APENAS por letras, garantindo que é um Código de Verificação real
+            ginfes_match = re.search(r"(?<!/)\b(\d+)\b\s+(?![A-Z]{9}\b)(?!\d{9}\b)[A-Z0-9]{9}\b", texto_limpo)
             if ginfes_match and ginfes_match.group(1) not in ['2024', '2025', '2026', '2027']:
                 doc_str = ginfes_match.group(1)
                 
@@ -102,7 +103,7 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
             dados["cnpj_forn"] = re.sub(r"\D", "", cnpjs[0])
 
         # ---------------------------------------------------------
-        # 4. VALOR TOTAL (Busca em "raio-x" até 80 caracteres de distância)
+        # 4. VALOR TOTAL (Com Fallback Matemático Supremo)
         # ---------------------------------------------------------
         padroes_valor = [
             r"ALIQUOTA.{0,80}?(\d+(?:[.,]\d{3})*[.,]\d{2})", 
@@ -127,13 +128,28 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
                     break
             if v_raw: break
 
-        # Conversão Matemática Blindada
+        # Conversão Matemática ou Arrastão (Fallback Supremo)
         if v_raw:
             if len(v_raw) > 3 and v_raw[-3] in [',', '.']:
                 v_str = re.sub(r'[.,]', '', v_raw[:-3]) + '.' + v_raw[-2:]
             else:
                 v_str = re.sub(r'[.,]', '', v_raw)
             dados["valor_total"] = float(v_str)
+        else:
+            # FALLBACK SUPREMO: Se o PDF estiver com as colunas desordenadas e a busca espacial falhar,
+            # o sistema extrai TODOS os valores monetários do documento e assume o MAIOR valor 
+            # como sendo o Valor Total da Nota.
+            todos_valores = re.findall(r"(\d{1,10}(?:\.\d{3})*,\d{2})", texto_denso)
+            valores_float = []
+            for val in todos_valores:
+                if len(val) > 3 and val[-3] in [',', '.']:
+                    v_str = re.sub(r'[.,]', '', val[:-3]) + '.' + val[-2:]
+                else:
+                    v_str = re.sub(r'[.,]', '', val)
+                valores_float.append(float(v_str))
+            
+            if valores_float:
+                dados["valor_total"] = max(valores_float)
             
         # ---------------------------------------------------------
         # VALIDAÇÃO FINAL
@@ -237,8 +253,8 @@ def gerar_registro_1300(nf, obs=""):
     return f"|1300|{nf.get('data', '')}|55|5|{formatar_valor(nf.get('valor_total', 0))}|1|{obs}|SISTEMA|"
 
 # --- INTERFACE VISUAL ---
-st.set_page_config(page_title="Domínio Automator v8.9", layout="wide")
-st.title("⚡ Domínio Automator - V8.9 (A Máquina Definitiva)")
+st.set_page_config(page_title="Domínio Automator v9.0", layout="wide")
+st.title("⚡ Domínio Automator - V9.0 (O Padrão Ouro)")
 
 with st.sidebar:
     st.header("⚙️ Painel de Controlo")
@@ -252,7 +268,7 @@ with st.sidebar:
     modo_offline = "RELÂMPAGO" in metodo
     
     if modo_offline:
-        st.success("Técnica de Texto Denso ativada. Processamento em Segundos!")
+        st.success("Técnica de Texto Denso e Arrastão de Valores ativada. Processamento em Segundos!")
     else:
         st.warning("Uso da IA (Gemini). Cole uma chave válida abaixo se quiser usar a IA.")
         api_input = st.text_input("Nova Gemini API Key", value=DEFAULT_KEY, type="password")
@@ -368,10 +384,10 @@ with t2:
         st.download_button(
             label=f"📥 Transferir Ficheiro de Importação ({len(st.session_state.notas_finalizadas)} Notas)",
             data=txt_final.encode('latin-1', errors='replace'),
-            file_name=f"lote_dominio_V8.9_{datetime.now().strftime('%H%M')}.txt",
+            file_name=f"lote_dominio_V9.0_{datetime.now().strftime('%H%M')}.txt",
             mime="text/plain",
             use_container_width=True
         )
 
 st.divider()
-st.caption("v8.9 - A Máquina Definitiva (Motor Misto com Raio-X de 80 caracteres).")
+st.caption("v9.0 - A Máquina Definitiva (Motor Misto com Busca Extrema).")
