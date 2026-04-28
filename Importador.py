@@ -40,20 +40,23 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
         # Transforma o texto numa massa densa sem espaços e em maiúsculas
         texto_denso = re.sub(r'\s+', '', texto_bruto).upper()
         
-        # Remove acentos (Ex: NÚMERO -> NUMERO, SERVIÇO -> SERVICO)
+        # Remove acentos (Ex: NÚMERO -> NUMERO, LÍQUIDO -> LIQUIDO)
         texto_denso = ''.join(c for c in unicodedata.normalize('NFD', texto_denso) if unicodedata.category(c) != 'Mn')
         
         dados = {"doc": None, "serie": "1", "data": None, "cnpj_forn": None, "valor_total": None, "aliq_icms": 0.0, "file_name": file_name}
         
-        # 1. NÚMERO DO DOCUMENTO (Super flexível ignorando lixo entre a palavra e o número)
+        # 1. NÚMERO DO DOCUMENTO (Expandido para "NOTA:")
         doc_match = re.search(r"NUMERODANFS-E[^\d]*0*(\d+)", texto_denso)
         if not doc_match: doc_match = re.search(r"NUMERODANOTA[^\d]*0*(\d+)", texto_denso)
+        if not doc_match: doc_match = re.search(r"NOTAFISCAL[^\d]*0*(\d+)", texto_denso)
+        if not doc_match: doc_match = re.search(r"NOTA[^\d]*0*(\d+)", texto_denso)
         if not doc_match: doc_match = re.search(r"NFS-E[^\d]*0*(\d+)", texto_denso)
         if doc_match: dados["doc"] = int(doc_match.group(1))
             
         # 2. DATA
         data_match = re.search(r"COMPETENCIADANFS-E[^\d]*(\d{2}/\d{2}/\d{4})", texto_denso)
         if not data_match: data_match = re.search(r"EMISSAO[^\d]*(\d{2}/\d{2}/\d{4})", texto_denso)
+        if not data_match: data_match = re.search(r"DATA[^\d]*(\d{2}/\d{2}/\d{4})", texto_denso)
         if not data_match: data_match = re.search(r"(\d{2}/\d{2}/\d{4})", texto_denso) # Pega a primeira data que aparecer
         if data_match: dados["data"] = data_match.group(1)
             
@@ -61,10 +64,10 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
         cnpjs = re.findall(r"(\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2})", texto_denso)
         if cnpjs: dados["cnpj_forn"] = re.sub(r"\D", "", cnpjs[0])
             
-        # 4. VALOR TOTAL (Super flexível para não depender de R$ exatos)
-        valor_match = re.search(r"VALORDOSERVICO[^\d]*([\d\.,]+)", texto_denso)
+        # 4. VALOR TOTAL (Expandido para "VALOR LIQUIDO")
+        valor_match = re.search(r"VALORLIQUIDO[^\d]*([\d\.,]+)", texto_denso)
+        if not valor_match: valor_match = re.search(r"VALORDOSERVICO[^\d]*([\d\.,]+)", texto_denso)
         if not valor_match: valor_match = re.search(r"VALORTOTALDOSERVICO[^\d]*([\d\.,]+)", texto_denso)
-        if not valor_match: valor_match = re.search(r"VALORLIQUIDODANFS-E[^\d]*([\d\.,]+)", texto_denso)
         if not valor_match: valor_match = re.search(r"VALORTOTAL[^\d]*([\d\.,]+)", texto_denso)
         if not valor_match: valor_match = re.search(r"R\$[^\d]*([\d\.,]+)", texto_denso) # Fallback
         
@@ -84,8 +87,8 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
                     v_str = v_raw
             dados["valor_total"] = float(v_str)
             
-        # Validação final
-        if dados["doc"] and dados["cnpj_forn"] and dados["valor_total"] is not None:
+        # Validação final robusta
+        if dados["doc"] is not None and dados["cnpj_forn"] and dados["valor_total"] is not None:
             return dados, None
         else:
             return None, f"Leitura Incompleta -> Doc:{dados['doc']} | CNPJ:{dados['cnpj_forn']} | R$:{dados['valor_total']}"
@@ -96,10 +99,11 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
 # ==========================================
 # MOTOR IA (GEMINI) - FALLBACK COM DETETIVE DE ERROS
 # ==========================================
-DEFAULT_KEY = "AIzaSyB_mDR97ABexRXVSUQkxd_bgYjL_xHKaw8"
+# Aviso: A chave antiga foi revogada pelo Google por ter sido exposta no GitHub!
+DEFAULT_KEY = "" 
 
 def call_gemini_api_direct(file_name, file_bytes, model_name, api_key, status_placeholder):
-    if not api_key: return None, "Chave de API ausente."
+    if not api_key: return None, "Chave de API ausente. Insira uma nova chave válida."
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key.strip()}"
     base64_data = base64.b64encode(file_bytes).decode('utf-8')
     prompt = """Extraia os dados desta Nota Fiscal de Serviço. Responda APENAS com um objeto JSON válido.
@@ -139,6 +143,8 @@ def call_gemini_api_direct(file_name, file_bytes, model_name, api_key, status_pl
                 
             elif response.status_code == 400:
                 err_msg = response.json().get('error', {}).get('message', 'Formato Rejeitado')
+                if "API Key" in err_msg or "API key" in err_msg:
+                    return None, "🚨 ERRO CRÍTICO: A sua Chave de API foi bloqueada ou é inválida. Por favor, gere uma nova no Google AI Studio."
                 return None, f"Erro 400 do Google: {err_msg}"
             elif response.status_code == 404:
                 return None, f"Erro HTTP 404: Modelo '{model_name}' não encontrado. Tente a opção '-latest' na barra lateral."
@@ -177,8 +183,8 @@ def gerar_registro_1300(nf, obs=""):
     return f"|1300|{nf.get('data', '')}|55|5|{formatar_valor(nf.get('valor_total', 0))}|1|{obs}|SISTEMA|"
 
 # --- INTERFACE VISUAL ---
-st.set_page_config(page_title="Domínio Automator v8.2", layout="wide")
-st.title("⚡ Domínio Automator - V8.2 (Motor Extra Forte)")
+st.set_page_config(page_title="Domínio Automator v8.3", layout="wide")
+st.title("⚡ Domínio Automator - V8.3 (Motor Extra Forte)")
 
 with st.sidebar:
     st.header("⚙️ Painel de Controlo")
@@ -194,11 +200,10 @@ with st.sidebar:
     if modo_offline:
         st.success("Técnica de Texto Denso ativada. Processamento em Segundos!")
     else:
-        st.warning("Uso da IA (Gemini 2.0). Processamento mais lento, mas altamente preciso.")
-        api_input = st.text_area("Gemini API Keys", value=DEFAULT_KEY)
+        st.warning("Uso da IA (Gemini). Cole uma chave válida abaixo se quiser usar a IA.")
+        api_input = st.text_input("Nova Gemini API Key", value=DEFAULT_KEY, type="password")
         keys_list = [k.strip() for k in api_input.replace(',', '\n').split('\n') if k.strip()]
         
-        # Atualizado para usar Gemini 2.0 Flash como padrão absoluto
         sel_model = st.selectbox("Versão do Gemini", ["gemini-2.0-flash", "gemini-1.5-flash"], index=0)
         delay_global = st.slider("Pausa entre notas (IA)", 2, 10, 4)
     
@@ -262,29 +267,34 @@ with t1:
                 status_msg.success(f"🎉 Leitura Concluída em {tempo_total} segundos!")
             
             else:
-                key_index = 0
-                for idx, (f_name, f_bytes) in enumerate(tarefas):
-                    if st.session_state.parar: break
-                    current_key = keys_list[key_index % len(keys_list)]
-                    status_msg.markdown(f"🧠 IA a ler nota **{len(st.session_state.notas_finalizadas) + 1}/{total_arquivos}**: `{f_name}`")
-                    
-                    res, erro = call_gemini_api_direct(f_name, f_bytes, sel_model, current_key, status_msg)
-                    if res:
-                        st.session_state.notas_finalizadas[f_name] = res
-                        if f_name in st.session_state.falhas: del st.session_state.falhas[f_name]
-                    else:
-                        st.session_state.falhas[f_name] = erro
-                        if "429" in str(erro) and len(keys_list) > 1: key_index += 1
+                if not keys_list:
+                    st.error("Cole uma nova Chave de API na barra lateral para usar a IA.")
+                else:
+                    key_index = 0
+                    for idx, (f_name, f_bytes) in enumerate(tarefas):
+                        if st.session_state.parar: break
+                        current_key = keys_list[key_index % len(keys_list)]
+                        status_msg.markdown(f"🧠 IA a ler nota **{len(st.session_state.notas_finalizadas) + 1}/{total_arquivos}**: `{f_name}`")
                         
-                    pbar.progress(len(st.session_state.notas_finalizadas) / total_arquivos)
-                    status_msg.markdown(f"⏱️ Pausa de {delay_global}s...")
-                    time.sleep(delay_global)
-                if not st.session_state.parar: status_msg.success("🎉 Leitura IA Concluída!")
+                        res, erro = call_gemini_api_direct(f_name, f_bytes, sel_model, current_key, status_msg)
+                        if res:
+                            st.session_state.notas_finalizadas[f_name] = res
+                            if f_name in st.session_state.falhas: del st.session_state.falhas[f_name]
+                        else:
+                            st.session_state.falhas[f_name] = erro
+                            if "429" in str(erro) and len(keys_list) > 1: key_index += 1
+                            if "ERRO CRÍTICO" in str(erro): 
+                                break # Para tudo se a chave for bloqueada
+                            
+                        pbar.progress(len(st.session_state.notas_finalizadas) / total_arquivos)
+                        status_msg.markdown(f"⏱️ Pausa de {delay_global}s...")
+                        time.sleep(delay_global)
+                    if not st.session_state.parar: status_msg.success("🎉 Leitura IA Concluída!")
             
             st.rerun()
 
     if st.session_state.falhas:
-        with st.expander(f"⚠️ Notas com Falha ({len(st.session_state.falhas)}) - Tente usar a IA para estas!"):
+        with st.expander(f"⚠️ Notas com Falha ({len(st.session_state.falhas)}) - Verifique o motivo!"):
             st.table(pd.DataFrame([{"Arquivo": k, "Motivo": v} for k, v in st.session_state.falhas.items()]))
 
     if st.session_state.notas_finalizadas:
@@ -304,10 +314,10 @@ with t2:
         st.download_button(
             label=f"📥 Transferir Ficheiro de Importação ({len(st.session_state.notas_finalizadas)} Notas)",
             data=txt_final.encode('latin-1', errors='replace'),
-            file_name=f"lote_dominio_V8.2_{datetime.now().strftime('%H%M')}.txt",
+            file_name=f"lote_dominio_V8.3_{datetime.now().strftime('%H%M')}.txt",
             mime="text/plain",
             use_container_width=True
         )
 
 st.divider()
-st.caption("v8.2 - Algoritmos de busca extra-flexíveis (Expressões Regulares) para o Modo Relâmpago.")
+st.caption("v8.3 - Reforço Absoluto no Motor Offline. A Chave API exposta foi removida por segurança.")
