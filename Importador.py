@@ -23,12 +23,12 @@ class JSONParser:
             return texto
 
 # ==========================================
-# MOTOR OFFLINE - TÉCNICA HÍBRIDA (V9.4)
+# MOTOR OFFLINE - TÉCNICA HÍBRIDA (V9.5)
 # ==========================================
 def extrair_dados_pdf_offline(file_name, file_bytes):
     """
-    Lê o PDF com precisão máxima. Usa Texto Denso para CNPJs e Datas (rígido), 
-    Texto Limpo para Valores, e o Nome do Ficheiro como último recurso (Truque do Nome).
+    Lê o PDF com precisão máxima. Com proteção contra Falsos CNPJs,
+    Filtro Absoluto de Zeros (0.00) e Leitura Inteligente do Nome do Arquivo.
     """
     try:
         leitor = PyPDF2.PdfReader(io.BytesIO(file_bytes))
@@ -45,76 +45,46 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
         texto_limpo = re.sub(r'\s+', ' ', texto_bruto).upper()
         texto_limpo = ''.join(c for c in unicodedata.normalize('NFD', texto_limpo) if unicodedata.category(c) != 'Mn')
         
-        # TEXTO DENSO: Remove espaços para padrões rígidos imunes a colunas
+        # TEXTO DENSO: Remove espaços para padrões rígidos
         texto_denso = texto_limpo.replace(' ', '')
         
         dados = {"doc": None, "serie": "1", "data": None, "cnpj_forn": None, "valor_total": None, "aliq_icms": 0.0, "file_name": file_name}
         
         # ---------------------------------------------------------
-        # 1. NÚMERO DO DOCUMENTO (Busca de Trechos + Jargões Fatura/Recibo/NF + Nome Arquivo)
+        # 1. NÚMERO DO DOCUMENTO
         # ---------------------------------------------------------
         doc_str = None
         
-        # 1.1 Procura direta por jargões curtos
-        padroes_diretos = [
-            r"\bNF\s*[N0Oº°]?\s*[:.-]?\s*0*(\d+)\b",  
-            r"\bDANFE\s*[N0Oº°]?\s*[:.-]?\s*0*(\d+)\b", 
-            r"\bN[Oº°]\s*[:.-]?\s*0*(\d+)\b",
-            r"\bFATURA\s*[N0Oº°]?\s*[:.-]?\s*0*(\d+)\b",
-            r"\bRECIBO\s*[N0Oº°]?\s*[:.-]?\s*0*(\d+)\b"
+        # Busca super flexível sem exigir fronteiras no fim (evita colunas coladas)
+        padroes_doc = [
+            r"NUMERO DA NFS-E[^\d]{0,20}?0*(\d+)",
+            r"NUMERO DA NOTA[^\d]{0,20}?0*(\d+)",
+            r"NFS-E[^\d]{0,10}?0*(\d+)",
+            r"NUMERO[^\d]{0,15}?0*(\d+)",
+            r"NF\s*[:.-]?\s*0*(\d+)",
+            r"DANFE\s*[:.-]?\s*0*(\d+)",
+            r"FATURA\s*[:.-]?\s*0*(\d+)",
+            r"RECIBO\s*[:.-]?\s*0*(\d+)",
+            r"NOTA\s*[:.-]?\s*0*(\d+)"
         ]
-        for padrao in padroes_diretos:
-            match = re.search(padrao, texto_limpo)
-            if match and match.group(1) not in ['2024', '2025', '2026', '2027']:
-                doc_str = match.group(1)
-                break
-
-        # 1.2 Procura o rótulo e extrai uma amostra de 80 letras a seguir.
-        if not doc_str:
-            padroes_doc = [
-                r"NUMERO DA NFS-E(.{0,80})",
-                r"NUMERO DA NOTA(.{0,80})",
-                r"NOTA FISCAL ELETRONICA(.{0,80})",
-                r"NOTA FISCAL(.{0,80})",
-                r"NOTA:(.{0,80})",
-                r"NFS-E(.{0,80})",
-                r"NUMERO(.{0,80})"
-            ]
-            
-            for padrao in padroes_doc:
-                match = re.search(padrao, texto_limpo)
-                if match:
-                    trecho = match.group(1)
-                    numeros = re.findall(r"(?<!/)\b(\d+)\b(?!/)", trecho)
-                    numeros_validos = [n for n in numeros if n not in ['2024', '2025', '2026', '2027'] and len(n) <= 15]
-                    if numeros_validos:
-                        doc_str = numeros_validos[0]
-                        break
+        
+        for padrao in padroes_doc:
+            matches = re.findall(padrao, texto_limpo)
+            for m in matches:
+                if m not in ['2024', '2025', '2026', '2027'] and len(m) <= 15:
+                    doc_str = m
+                    break
+            if doc_str: break
                     
-        # 1.3 Fallback GINFES/Guarulhos
+        # Fallback GINFES/Guarulhos
         if not doc_str:
             ginfes_match = re.search(r"(?<!/)\b(\d+)\b\s+(?![A-Z]{9}\b)(?!\d{9}\b)[A-Z0-9]{9}\b", texto_limpo)
             if ginfes_match and ginfes_match.group(1) not in ['2024', '2025', '2026', '2027']:
                 doc_str = ginfes_match.group(1)
                 
-        # 1.4 Fallback Final no Texto Denso
-        if not doc_str:
-            for padrao in [
-                r"NUMERODANFS-E[^\d]{0,20}0*(\d+)(?!\/)",
-                r"NUMERODANOTA[^\d]{0,20}0*(\d+)(?!\/)"
-            ]:
-                matches = re.findall(padrao, texto_denso)
-                for m in matches:
-                    m_clean = m.lstrip('0') or '0'
-                    if m_clean not in ['2024', '2025', '2026', '2027'] and len(m_clean) < 15:
-                        doc_str = m_clean
-                        break
-                if doc_str: break
-
-        # 1.5 Fallback pelo NOME DO ARQUIVO (O Truque do Nome)
+        # Fallback pelo NOME DO ARQUIVO (Aceita _ como separador, ex: NF_92_R_...)
         if not doc_str and file_name:
-            # Ex: NF_33, NF 92, NOTA_10
-            match_nome = re.search(r'\b(?:NF|NOTA|FATURA)[_ -]*[NO]?[_ -]*0*(\d+)\b', file_name.upper())
+            match_nome = re.search(r'(?:NF|NOTA|FATURA)[_ -]*[Nn]?[Oo]?[_ -]*0*(\d+)(?:\b|_)', file_name.upper())
             if match_nome and match_nome.group(1) not in ['2024', '2025', '2026', '2027']:
                 doc_str = match_nome.group(1)
 
@@ -137,19 +107,21 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
                 break
 
         # ---------------------------------------------------------
-        # 3. CNPJ Emitente (Texto Denso - Infalível)
+        # 3. CNPJ Emitente (Blindado contra Códigos de Verificação)
         # ---------------------------------------------------------
-        cnpjs = re.findall(r"(\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2})", texto_denso)
+        # Prioridade máxima para CNPJ formatado corretamente (evita falsos positivos com códigos de 14 dígitos)
+        cnpjs = re.findall(r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b", texto_limpo)
         if not cnpjs:
+            # Se não tiver formatação, EXIGE que a palavra CNPJ esteja imediatamente antes
             cnpj_match = re.search(r"CNPJ[^\d]*(\d{14})", texto_denso)
             if cnpj_match: cnpjs = [cnpj_match.group(1)]
         if cnpjs:
             dados["cnpj_forn"] = re.sub(r"\D", "", cnpjs[0])
 
         # ---------------------------------------------------------
-        # 4. VALOR TOTAL (Texto Limpo + Formatos US/BR + Inteiros)
+        # 4. VALOR TOTAL (Filtro Anti-Zero Absoluto)
         # ---------------------------------------------------------
-        regex_dinheiro = r"\b(\d{1,10}(?:[.,]\d{3})*[.,]\d{2})\b"
+        regex_dinheiro = r"(\d{1,10}(?:[.,]\d{3})*[.,]\d{2})(?!\d)"
         
         padroes_valor = [
             rf"ALIQUOTA.{{0,80}}?{regex_dinheiro}", 
@@ -162,47 +134,41 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
             rf"VALOR.{{0,80}}?{regex_dinheiro}"
         ]
         
-        v_raw = None
+        v_float_final = None
         for padrao in padroes_valor:
             matches = re.findall(padrao, texto_limpo)
             for val in matches:
-                val_check = val.replace(',', '.')
-                if val_check not in ["0.00", "0.01", "00.00"]: 
-                    v_raw = val
+                # Conversão matemática imediata
+                v_str = re.sub(r'[.,]', '', val[:-3]) + '.' + val[-2:] if len(val)>3 and val[-3] in '.,' else re.sub(r'[.,]', '', val)
+                v_f = float(v_str)
+                # CRÍTICO: Descarta qualquer taxa de INSS/ISS que seja 0.0
+                if v_f > 0: 
+                    v_float_final = v_f
                     break
-            if v_raw: break
+            if v_float_final: break
 
-        # Conversão Matemática Universal
-        if v_raw:
-            if len(v_raw) > 3 and v_raw[-3] in [',', '.']:
-                v_str = re.sub(r'[.,]', '', v_raw[:-3]) + '.' + v_raw[-2:]
-            else:
-                v_str = re.sub(r'[.,]', '', v_raw)
-            dados["valor_total"] = float(v_str)
+        if v_float_final:
+            dados["valor_total"] = v_float_final
         else:
-            # FALLBACK SUPREMO MATEMÁTICO (Agora imune aos ZEROS)
+            # FALLBACK SUPREMO MATEMÁTICO
             todos_valores = re.findall(regex_dinheiro, texto_limpo)
             valores_float = []
             for val in todos_valores:
-                if len(val) > 3 and val[-3] in [',', '.']:
-                    v_str = re.sub(r'[.,]', '', val[:-3]) + '.' + val[-2:]
-                else:
-                    v_str = re.sub(r'[.,]', '', val)
-                    
-                v_float = float(v_str)
-                if v_float > 0: # CRUCIAL: Ignora "0,00" para não dar R$: 0.0
-                    valores_float.append(v_float)
+                v_str = re.sub(r'[.,]', '', val[:-3]) + '.' + val[-2:] if len(val)>3 and val[-3] in '.,' else re.sub(r'[.,]', '', val)
+                v_f = float(v_str)
+                if v_f > 0:
+                    valores_float.append(v_f)
             
             if valores_float:
                 dados["valor_total"] = max(valores_float)
                 
-            # Fallback Inteiros e Nome do Arquivo (Ex: R$ 51000 ou ..._R_51000.pdf)
+            # Fallback Inteiros e Nome do Arquivo
             if not dados.get("valor_total"):
                 match_inteiro = re.search(r'R\$\s*(\d{2,10}(?:[.,]\d{3})*)(?!\d)', texto_limpo)
                 if match_inteiro:
                     dados["valor_total"] = float(re.sub(r'[.,]', '', match_inteiro.group(1)))
                 elif file_name:
-                    match_val_nome = re.search(r'_R\$?[_ -]*(\d{2,10})\b', file_name.upper())
+                    match_val_nome = re.search(r'_R\$?[_ -]*(\d{2,10})(?:\b|_)', file_name.upper())
                     if match_val_nome:
                         dados["valor_total"] = float(match_val_nome.group(1))
             
@@ -308,7 +274,7 @@ def gerar_registro_1300(nf, obs=""):
     return f"|1300|{nf.get('data', '')}|55|5|{formatar_valor(nf.get('valor_total', 0))}|1|{obs}|SISTEMA|"
 
 # --- INTERFACE VISUAL ---
-st.set_page_config(page_title="Domínio Automator v9.4", layout="wide")
+st.set_page_config(page_title="Domínio Automator v9.5", layout="wide")
 st.title("Importador de Notas Automatizado.")
 
 with st.sidebar:
@@ -323,7 +289,7 @@ with st.sidebar:
     modo_offline = "RÁPIDO" in metodo
     
     if modo_offline:
-        st.success("Técnica Híbrida v9.4 ativada. Lógica de Arquivos e Prevenção de Zeros Ativos.")
+        st.success("Técnica Híbrida v9.5 ativada. Análise profunda e anti-zeros ativos.")
     else:
         st.warning("Uso da IA (Gemini). Cole uma chave válida abaixo se quiser usar a IA.")
         api_input = st.text_input("Nova Gemini API Key", value=DEFAULT_KEY, type="password")
@@ -444,10 +410,10 @@ with t2:
         st.download_button(
             label=f"📥 Transferir Ficheiro de Importação ({len(st.session_state.notas_finalizadas)} Notas)",
             data=txt_final.encode('latin-1', errors='replace'),
-            file_name=f"lote_dominio_V9.4_{datetime.now().strftime('%H%M')}.txt",
+            file_name=f"lote_dominio_V9.5_{datetime.now().strftime('%H%M')}.txt",
             mime="text/plain",
             use_container_width=True
         )
 
 st.divider()
-st.caption("by Albert - Vocabulário Nacional V9.4.")
+st.caption("by Albert - Análise Profunda V9.5.")
