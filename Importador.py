@@ -273,7 +273,7 @@ with st.sidebar:
         "1. MODO RÁPIDO (Código Offline) - RECOMENDADO", 
         "2. MODO LENTO (Inteligência Artificial Google)"
     ])
-    modo_offline = "RELÂMPAGO" in metodo
+    modo_offline = "RÁPIDO" in metodo
     
     if modo_offline:
         st.success("Técnica Híbrida: Rígida para CNPJs e Flexível para Valores. O melhor dos dois mundos!")
@@ -314,7 +314,7 @@ with t1:
             st.session_state.notas_finalizadas = {}
             st.session_state.falhas = {}
             st.session_state.parar = False
-            st.rerun()
+            st.rerun() # Aqui o rerun é propositado (apenas para limpar a memória visível)
             
         if btn_start:
             st.session_state.parar = False
@@ -326,53 +326,63 @@ with t1:
                 f.seek(0)
                 tarefas.append((f.name, f.read()))
             
-            if modo_offline:
-                status_msg.info("⚡ A ler as notas através de código puro...")
-                inicio = time.time()
-                for f_name, f_bytes in tarefas:
-                    if st.session_state.parar: break
-                    
-                    res, erro = extrair_dados_pdf_offline(f_name, f_bytes)
-                    if res:
-                        st.session_state.notas_finalizadas[f_name] = res
-                        if f_name in st.session_state.falhas: del st.session_state.falhas[f_name]
-                    else:
-                        st.session_state.falhas[f_name] = erro
-                        
-                    pbar.progress(len(st.session_state.notas_finalizadas) / total_arquivos)
-                
-                tempo_total = round(time.time() - inicio, 2)
-                status_msg.success(f"🎉 Leitura Concluída em {tempo_total} segundos!")
+            total_tarefas = len(tarefas)
             
+            if total_tarefas == 0:
+                status_msg.warning("⚠️ Todas as notas selecionadas já foram processadas ou a lista está vazia!")
             else:
-                if not keys_list:
-                    st.error("Cole uma nova Chave de API na barra lateral para usar a IA.")
-                else:
-                    key_index = 0
+                if modo_offline:
+                    status_msg.info("⚡ A ler as notas através de código puro...")
+                    inicio = time.time()
                     for idx, (f_name, f_bytes) in enumerate(tarefas):
                         if st.session_state.parar: break
-                        current_key = keys_list[key_index % len(keys_list)]
-                        status_msg.markdown(f"🧠 IA a ler nota **{len(st.session_state.notas_finalizadas) + 1}/{total_arquivos}**: `{f_name}`")
                         
-                        res, erro = call_gemini_api_direct(f_name, f_bytes, sel_model, current_key, status_msg)
+                        res, erro = extrair_dados_pdf_offline(f_name, f_bytes)
                         if res:
                             st.session_state.notas_finalizadas[f_name] = res
                             if f_name in st.session_state.falhas: del st.session_state.falhas[f_name]
                         else:
                             st.session_state.falhas[f_name] = erro
-                            if "429" in str(erro) and len(keys_list) > 1: key_index += 1
-                            if "ERRO CRÍTICO" in str(erro): 
-                                break # Para tudo se a chave for bloqueada
                             
-                        pbar.progress(len(st.session_state.notas_finalizadas) / total_arquivos)
-                        status_msg.markdown(f"⏱️ Pausa de {delay_global}s...")
-                        time.sleep(delay_global)
-                    if not st.session_state.parar: status_msg.success("🎉 Leitura IA Concluída!")
+                        # Atualização segura e correta da barra de progresso
+                        pbar.progress(min((idx + 1) / total_tarefas, 1.0))
+                    
+                    tempo_total = round(time.time() - inicio, 2)
+                    if not st.session_state.parar:
+                        status_msg.success(f"🎉 Leitura Concluída em {tempo_total} segundos!")
+                
+                else:
+                    if not keys_list:
+                        status_msg.error("Cole uma nova Chave de API na barra lateral para usar a IA.")
+                    else:
+                        key_index = 0
+                        for idx, (f_name, f_bytes) in enumerate(tarefas):
+                            if st.session_state.parar: break
+                            current_key = keys_list[key_index % len(keys_list)]
+                            status_msg.markdown(f"🧠 IA a ler nota **{idx + 1}/{total_tarefas}**: `{f_name}`")
+                            
+                            res, erro = call_gemini_api_direct(f_name, f_bytes, sel_model, current_key, status_msg)
+                            if res:
+                                st.session_state.notas_finalizadas[f_name] = res
+                                if f_name in st.session_state.falhas: del st.session_state.falhas[f_name]
+                            else:
+                                st.session_state.falhas[f_name] = erro
+                                if "429" in str(erro) and len(keys_list) > 1: key_index += 1
+                                if "ERRO CRÍTICO" in str(erro): 
+                                    break 
+                                
+                            # Atualização segura e correta da barra de progresso
+                            pbar.progress(min((idx + 1) / total_tarefas, 1.0))
+                            status_msg.markdown(f"⏱️ Pausa de {delay_global}s...")
+                            time.sleep(delay_global)
+                        if not st.session_state.parar:
+                            status_msg.success("🎉 Leitura IA Concluída!")
             
-            st.rerun()
+            # REMOVIDO: O comando st.rerun() que causava o recarregamento instantâneo do ecrã e escondia o progresso!
 
     if st.session_state.falhas:
-        with st.expander(f"⚠️ Notas com Falha ({len(st.session_state.falhas)}) - Verifique o motivo!"):
+        # Tabela de erros forçada a estar ABERTA se houverem falhas (expanded=True)
+        with st.expander(f"⚠️ Notas com Falha ({len(st.session_state.falhas)}) - Verifique o motivo!", expanded=True):
             st.table(pd.DataFrame([{"Arquivo": k, "Motivo": v} for k, v in st.session_state.falhas.items()]))
 
     if st.session_state.notas_finalizadas:
@@ -398,4 +408,4 @@ with t2:
         )
 
 st.divider()
-st.caption("by Albert.")
+st.caption("by Albert - Interface Gráfica Estabilizada.")
