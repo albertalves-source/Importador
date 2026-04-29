@@ -23,7 +23,7 @@ class JSONParser:
             return texto
 
 # ==========================================
-# MOTOR OFFLINE - TÉCNICA HÍBRIDA (V9.2)
+# MOTOR OFFLINE - TÉCNICA HÍBRIDA (V9.3)
 # ==========================================
 def extrair_dados_pdf_offline(file_name, file_bytes):
     """
@@ -51,38 +51,52 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
         dados = {"doc": None, "serie": "1", "data": None, "cnpj_forn": None, "valor_total": None, "aliq_icms": 0.0, "file_name": file_name}
         
         # ---------------------------------------------------------
-        # 1. NÚMERO DO DOCUMENTO (Busca de Trechos)
+        # 1. NÚMERO DO DOCUMENTO (Busca de Trechos + Jargões Fatura/Recibo/NF)
         # ---------------------------------------------------------
         doc_str = None
         
-        # Procura o rótulo e extrai uma amostra de 80 letras a seguir. Depois captura os números válidos.
-        padroes_doc = [
-            r"NUMERO DA NFS-E(.{0,80})",
-            r"NUMERO DA NOTA(.{0,80})",
-            r"NOTA FISCAL ELETRONICA(.{0,80})",
-            r"NOTA:(.{0,80})",
-            r"NFS-E(.{0,80})",
-            r"NUMERO(.{0,80})"
+        # 1.1 Procura direta por jargões curtos
+        padroes_diretos = [
+            r"\bNF\s*[N0O]?\s*[:.-]?\s*0*(\d+)\b",  # NF 33, NF: 92
+            r"\bDANFE\s*[N0O]?\s*[:.-]?\s*0*(\d+)\b" # DANFE 123
         ]
-        
-        for padrao in padroes_doc:
+        for padrao in padroes_diretos:
             match = re.search(padrao, texto_limpo)
-            if match:
-                trecho = match.group(1)
-                # Extrai números isolados (sem /) para não apanhar datas
-                numeros = re.findall(r"(?<!/)\b(\d+)\b(?!/)", trecho)
-                numeros_validos = [n for n in numeros if n not in ['2024', '2025', '2026', '2027'] and len(n) <= 15]
-                if numeros_validos:
-                    doc_str = numeros_validos[0]
-                    break
+            if match and match.group(1) not in ['2024', '2025', '2026', '2027']:
+                doc_str = match.group(1)
+                break
+
+        # 1.2 Procura o rótulo e extrai uma amostra de 80 letras a seguir.
+        if not doc_str:
+            padroes_doc = [
+                r"NUMERO DA NFS-E(.{0,80})",
+                r"NUMERO DA NOTA(.{0,80})",
+                r"NOTA FISCAL ELETRONICA(.{0,80})",
+                r"NOTA FISCAL(.{0,80})",
+                r"FATURA(.{0,80})",
+                r"RECIBO(.{0,80})",
+                r"NOTA:(.{0,80})",
+                r"NFS-E(.{0,80})",
+                r"NUMERO(.{0,80})"
+            ]
+            
+            for padrao in padroes_doc:
+                match = re.search(padrao, texto_limpo)
+                if match:
+                    trecho = match.group(1)
+                    numeros = re.findall(r"(?<!/)\b(\d+)\b(?!/)", trecho)
+                    numeros_validos = [n for n in numeros if n not in ['2024', '2025', '2026', '2027'] and len(n) <= 15]
+                    if numeros_validos:
+                        doc_str = numeros_validos[0]
+                        break
                     
-        # Fallback GINFES/Guarulhos
+        # 1.3 Fallback GINFES/Guarulhos
         if not doc_str:
             ginfes_match = re.search(r"(?<!/)\b(\d+)\b\s+(?![A-Z]{9}\b)(?!\d{9}\b)[A-Z0-9]{9}\b", texto_limpo)
             if ginfes_match and ginfes_match.group(1) not in ['2024', '2025', '2026', '2027']:
                 doc_str = ginfes_match.group(1)
                 
-        # Fallback Final no Texto Denso
+        # 1.4 Fallback Final no Texto Denso
         if not doc_str:
             for padrao in [
                 r"NUMERODANFS-E[^\d]{0,20}0*(\d+)(?!\/)",
@@ -125,35 +139,49 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
             dados["cnpj_forn"] = re.sub(r"\D", "", cnpjs[0])
 
         # ---------------------------------------------------------
-        # 4. VALOR TOTAL (Texto Limpo + Fallback Matemático Arrastão)
+        # 4. VALOR TOTAL (Texto Limpo + Formatos US/BR)
         # ---------------------------------------------------------
+        # O [.,] suporta ambas formatações: 51000.00 ou 51.000,00
+        regex_dinheiro = r"\b(\d{1,10}(?:[.,]\d{3})*[.,]\d{2})\b"
+        
         padroes_valor = [
-            r"ALIQUOTA.{0,80}?\b(\d{1,10}(?:\.\d{3})*,\d{2})\b", 
-            r"VALOR LIQUIDO.{0,80}?\b(\d{1,10}(?:\.\d{3})*,\d{2})\b",
-            r"VALOR DOS SERVICOS.{0,80}?\b(\d{1,10}(?:\.\d{3})*,\d{2})\b",
-            r"VALOR TOTAL.{0,80}?\b(\d{1,10}(?:\.\d{3})*,\d{2})\b",
-            r"TOTAL.{0,80}?\b(\d{1,10}(?:\.\d{3})*,\d{2})\b",
-            r"R\$.{0,80}?\b(\d{1,10}(?:\.\d{3})*,\d{2})\b"
+            rf"ALIQUOTA.{{0,80}}?{regex_dinheiro}", 
+            rf"VALOR LIQUIDO.{{0,80}}?{regex_dinheiro}",
+            rf"VALOR DOS SERVICOS.{{0,80}}?{regex_dinheiro}",
+            rf"VALOR TOTAL.{{0,80}}?{regex_dinheiro}",
+            rf"VALOR DA NOTA.{{0,80}}?{regex_dinheiro}",
+            rf"TOTAL.{{0,80}}?{regex_dinheiro}",
+            rf"R\$.{{0,80}}?{regex_dinheiro}",
+            rf"VALOR.{{0,80}}?{regex_dinheiro}"
         ]
         
         v_raw = None
         for padrao in padroes_valor:
             matches = re.findall(padrao, texto_limpo)
             for val in matches:
-                if val not in ["0,00", "0.00", "0,01"]: 
+                # Normaliza para check de zeros independentemente de ser , ou .
+                val_check = val.replace(',', '.')
+                if val_check not in ["0.00", "0.01", "00.00"]: 
                     v_raw = val
                     break
             if v_raw: break
 
+        # Conversão Matemática Universal
         if v_raw:
-            v_str = v_raw.replace('.', '').replace(',', '.')
+            if len(v_raw) > 3 and v_raw[-3] in [',', '.']:
+                v_str = re.sub(r'[.,]', '', v_raw[:-3]) + '.' + v_raw[-2:]
+            else:
+                v_str = re.sub(r'[.,]', '', v_raw)
             dados["valor_total"] = float(v_str)
         else:
             # FALLBACK SUPREMO MATEMÁTICO
-            todos_valores = re.findall(r"\b\d{1,10}(?:\.\d{3})*,\d{2}\b", texto_limpo)
+            todos_valores = re.findall(regex_dinheiro, texto_limpo)
             valores_float = []
             for val in todos_valores:
-                v_str = val.replace('.', '').replace(',', '.')
+                if len(val) > 3 and val[-3] in [',', '.']:
+                    v_str = re.sub(r'[.,]', '', val[:-3]) + '.' + val[-2:]
+                else:
+                    v_str = re.sub(r'[.,]', '', val)
                 valores_float.append(float(v_str))
             
             if valores_float:
@@ -261,7 +289,7 @@ def gerar_registro_1300(nf, obs=""):
     return f"|1300|{nf.get('data', '')}|55|5|{formatar_valor(nf.get('valor_total', 0))}|1|{obs}|SISTEMA|"
 
 # --- INTERFACE VISUAL ---
-st.set_page_config(page_title="Domínio Automator v9.2", layout="wide")
+st.set_page_config(page_title="Domínio Automator v9.3", layout="wide")
 st.title("Importador de Notas Automatizado.")
 
 with st.sidebar:
@@ -276,7 +304,7 @@ with st.sidebar:
     modo_offline = "RÁPIDO" in metodo
     
     if modo_offline:
-        st.success("Técnica Híbrida: Rígida para CNPJs e Flexível para Valores. O melhor dos dois mundos!")
+        st.success("Técnica Híbrida v9.3 ativada. Compatível com NF, FATURA, DANFE e valores US/BR.")
     else:
         st.warning("Uso da IA (Gemini). Cole uma chave válida abaixo se quiser usar a IA.")
         api_input = st.text_input("Nova Gemini API Key", value=DEFAULT_KEY, type="password")
@@ -314,7 +342,7 @@ with t1:
             st.session_state.notas_finalizadas = {}
             st.session_state.falhas = {}
             st.session_state.parar = False
-            st.rerun() # Aqui o rerun é propositado (apenas para limpar a memória visível)
+            st.rerun() 
             
         if btn_start:
             st.session_state.parar = False
@@ -344,7 +372,6 @@ with t1:
                         else:
                             st.session_state.falhas[f_name] = erro
                             
-                        # Atualização segura e correta da barra de progresso
                         pbar.progress(min((idx + 1) / total_tarefas, 1.0))
                     
                     tempo_total = round(time.time() - inicio, 2)
@@ -371,17 +398,13 @@ with t1:
                                 if "ERRO CRÍTICO" in str(erro): 
                                     break 
                                 
-                            # Atualização segura e correta da barra de progresso
                             pbar.progress(min((idx + 1) / total_tarefas, 1.0))
                             status_msg.markdown(f"⏱️ Pausa de {delay_global}s...")
                             time.sleep(delay_global)
                         if not st.session_state.parar:
                             status_msg.success("🎉 Leitura IA Concluída!")
-            
-            # REMOVIDO: O comando st.rerun() que causava o recarregamento instantâneo do ecrã e escondia o progresso!
 
     if st.session_state.falhas:
-        # Tabela de erros forçada a estar ABERTA se houverem falhas (expanded=True)
         with st.expander(f"⚠️ Notas com Falha ({len(st.session_state.falhas)}) - Verifique o motivo!", expanded=True):
             st.table(pd.DataFrame([{"Arquivo": k, "Motivo": v} for k, v in st.session_state.falhas.items()]))
 
@@ -402,10 +425,10 @@ with t2:
         st.download_button(
             label=f"📥 Transferir Ficheiro de Importação ({len(st.session_state.notas_finalizadas)} Notas)",
             data=txt_final.encode('latin-1', errors='replace'),
-            file_name=f"lote_dominio_V9.2_{datetime.now().strftime('%H%M')}.txt",
+            file_name=f"lote_dominio_V9.3_{datetime.now().strftime('%H%M')}.txt",
             mime="text/plain",
             use_container_width=True
         )
 
 st.divider()
-st.caption("by Albert - Interface Gráfica Estabilizada.")
+st.caption("by Albert - Vocabulário Nacional V9.3.")
