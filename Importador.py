@@ -23,12 +23,12 @@ class JSONParser:
             return texto
 
 # ==========================================
-# MOTOR OFFLINE - TÉCNICA HÍBRIDA (V9.7)
+# MOTOR OFFLINE - TÉCNICA HÍBRIDA (V9.8)
 # ==========================================
-def extrair_dados_pdf_offline(file_name, file_bytes):
+def extrair_dados_pdf_offline(file_name, file_bytes, cnpj_destino_usuario):
     """
-    Lê o PDF com precisão máxima. Com suporte a CPF (Pessoas Físicas),
-    fatiamento de colunas coladas (Salsicha Numérica) e Tolerância de CNPJ.
+    Lê o PDF com precisão máxima. Com motor de CNPJ elástico e 
+    filtro inteligente de Prestador vs Tomador.
     """
     try:
         leitor = PyPDF2.PdfReader(io.BytesIO(file_bytes))
@@ -51,375 +51,206 @@ def extrair_dados_pdf_offline(file_name, file_bytes):
         dados = {"doc": None, "serie": "1", "data": None, "cnpj_forn": None, "valor_total": None, "aliq_icms": 0.0, "file_name": file_name}
         
         # ---------------------------------------------------------
-        # 1. NÚMERO DO DOCUMENTO
+        # 1. CNPJ / CPF Emitente (Motor Elástico V9.8)
+        # ---------------------------------------------------------
+        # 1.1 Captura todos os documentos (CNPJ ou CPF) ignorando lixo entre números
+        docs_encontrados = []
+        
+        # Regex que aceita espaços/pontos opcionais entre os blocos numéricos
+        # CNPJ: 00.000.000/0001-00
+        regex_cnpj = r"(\d{2}\s*[\.\s-]?\s*\d{3}\s*[\.\s-]?\s*\d{3}\s*[\/\s-]?\s*\d{4}\s*[\-\s-]?\s*\d{2})"
+        # CPF: 000.000.000-00
+        regex_cpf = r"(\d{3}\s*[\.\s-]?\s*\d{3}\s*[\.\s-]?\s*\d{3}\s*[\-\s-]?\s*\d{2})"
+        
+        matches = re.findall(f"{regex_cnpj}|{regex_cpf}", texto_limpo)
+        for m in matches:
+            # Pega o grupo que deu match (CNPJ ou CPF)
+            doc_raw = m[0] if m[0] else m[1]
+            doc_limpo = "".join(filter(str.isdigit, doc_raw))
+            if doc_limpo and doc_limpo not in docs_encontrados:
+                docs_encontrados.append(doc_limpo)
+        
+        # 1.2 Lógica de Seleção: Qual deles é o fornecedor?
+        cnpj_alvo_limpo = "".join(filter(str.isdigit, str(cnpj_destino_usuario)))
+        
+        cnpj_final = None
+        if docs_encontrados:
+            # Se houver mais de um, o fornecedor costuma ser o que NÃO é a nossa empresa
+            for doc in docs_encontrados:
+                if doc != cnpj_alvo_limpo and doc != "00000000000000":
+                    cnpj_final = doc
+                    break
+            # Se só encontrou um e ele é o alvo, ou não sobrou nenhum, tenta o primeiro encontrado
+            if not cnpj_final:
+                cnpj_final = docs_encontrados[0]
+        
+        dados["cnpj_forn"] = cnpj_final if cnpj_final else "00000000000000"
+
+        # ---------------------------------------------------------
+        # 2. NÚMERO DO DOCUMENTO
         # ---------------------------------------------------------
         doc_str = None
-        
-        # Busca super flexível (agora com suporte a "Nº")
+        # Procura por jargões curtos (ignorando o código de verificação gigante)
         padroes_doc = [
             r"NUMERO DA NFS-E[^\d]{0,20}?0*(\d+)",
             r"NUMERO DA NOTA[^\d]{0,20}?0*(\d+)",
+            r"NOTA FISCAL[^\d]{0,10}?0*(\d+)",
+            r"NOTA:[^\d]{0,15}?0*(\d+)",
             r"NFS-E[^\d]{0,10}?0*(\d+)",
-            r"NUMERO[^\d]{0,15}?0*(\d+)",
-            r"N[Oº°][^\d]{0,10}?0*(\d+)",
             r"NF\s*[:.-]?\s*0*(\d+)",
-            r"DANFE\s*[:.-]?\s*0*(\d+)",
-            r"FATURA\s*[:.-]?\s*0*(\d+)",
-            r"RECIBO\s*[:.-]?\s*0*(\d+)",
-            r"NOTA\s*[:.-]?\s*0*(\d+)"
+            r"NUMERO[^\d]{0,15}?0*(\d+)"
         ]
         
         for padrao in padroes_doc:
             matches = re.findall(padrao, texto_limpo)
             for m in matches:
-                if m not in ['2024', '2025', '2026', '2027'] and len(m) <= 15:
+                # Impede capturar o ano ou o código de barras de 44 dígitos
+                if m not in ['2024', '2025', '2026', '2027'] and len(m) < 15:
                     doc_str = m
                     break
             if doc_str: break
-                    
-        # Fallback GINFES/Guarulhos
-        if not doc_str:
-            ginfes_match = re.search(r"(?<!/)\b(\d+)\b\s+(?![A-Z]{9}\b)(?!\d{9}\b)[A-Z0-9]{9}\b", texto_limpo)
-            if ginfes_match and ginfes_match.group(1) not in ['2024', '2025', '2026', '2027']:
-                doc_str = ginfes_match.group(1)
-                
-        # Fallback Final no Texto Denso (Com raio de busca gigante de 80 letras)
-        if not doc_str:
-            for padrao in [
-                r"NUMERODANFS-E[^\d]{0,80}?0*(\d+)(?!\/)",
-                r"NUMERODANOTA[^\d]{0,80}?0*(\d+)(?!\/)",
-                r"NOTAFISCAL[^\d]{0,80}?0*(\d+)(?!\/)",
-                r"NUMERO[^\d]{0,80}?0*(\d+)(?!\/)",
-                r"NFS-E[^\d]{0,40}?0*(\d+)(?!\/)",
-                r"NF[^\d]{0,40}?0*(\d+)(?!\/)"
-            ]:
-                matches = re.findall(padrao, texto_denso)
-                for m in matches:
-                    m_clean = m.lstrip('0') or '0'
-                    if m_clean not in ['2024', '2025', '2026', '2027'] and len(m_clean) < 15:
-                        doc_str = m_clean
-                        break
-                if doc_str: break
 
-        # Fallback pelo NOME DO ARQUIVO (Agora suporta NFS-e no nome)
+        # Truque do Nome do Arquivo
         if not doc_str and file_name:
-            match_nome = re.search(r'(?:NFS-E|NFSE|NF|NOTA|FATURA)[_ -]*[Nn]?[Oo]?[_ -]*0*(\d+)(?:\b|_|\.)', file_name.upper())
+            match_nome = re.search(r'(?:NFS-E|NFSE|NF|NOTA|FATURA)[_ -]*[Nn]?[Oo]?[_ -]*0*(\d+)', file_name.upper())
             if match_nome and match_nome.group(1) not in ['2024', '2025', '2026', '2027']:
                 doc_str = match_nome.group(1)
 
-        if doc_str:
-            dados["doc"] = int(doc_str)
+        if doc_str: dados["doc"] = int(doc_str)
 
         # ---------------------------------------------------------
-        # 2. DATA DE COMPETÊNCIA / EMISSÃO
+        # 3. DATA
         # ---------------------------------------------------------
-        padroes_data = [
-            r"COMPETENCIADANFS-E[^\d]*(\d{2}/\d{2}/\d{4})",
-            r"EMISSAO[^\d]*(\d{2}/\d{2}/\d{4})",
-            r"DATA[^\d]*(\d{2}/\d{2}/\d{4})",
-            r"(\d{2}/\d{2}/\d{4})"
-        ]
-        for padrao in padroes_data:
-            match = re.search(padrao, texto_denso)
-            if match:
-                dados["data"] = match.group(1)
-                break
+        data_match = re.search(r"(\d{2}/\d{2}/\d{4})", texto_denso)
+        if data_match: dados["data"] = data_match.group(1)
 
         # ---------------------------------------------------------
-        # 3. CNPJ / CPF Emitente
+        # 4. VALOR TOTAL (Fatiador de Colunas Coladas)
         # ---------------------------------------------------------
-        # Procura também pelo formato de 11 dígitos (CPF) para pessoas físicas
-        docs_fiscais = re.findall(r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b|\b\d{3}\.\d{3}\.\d{3}-\d{2}\b", texto_limpo)
-        if not docs_fiscais:
-            match_denso = re.search(r"(?:CNPJ|CPF|C\.N\.P\.J|C\.P\.F)[^\d]*(\d{14}|\d{11})(?!\d)", texto_denso)
-            if match_denso: docs_fiscais = [match_denso.group(1)]
-        if docs_fiscais:
-            dados["cnpj_forn"] = re.sub(r"\D", "", docs_fiscais[0])
-
-        # ---------------------------------------------------------
-        # 4. VALOR TOTAL (O Arrastão Supremo Fatiador)
-        # ---------------------------------------------------------
-        # Regex em modo "Faca": corta os valores sempre que vê duas casas decimais, 
-        # impedindo a fusão de colunas coladas (ex: 233.333,330,00 -> vira 233.333,33 e 0,00)
         regex_dinheiro = r"\d{1,10}(?:[.,]\d{3})*[.,]\d{2}"
         todos_valores = re.findall(regex_dinheiro, texto_limpo)
         valores_float = []
         
         for val in todos_valores:
-            val_check = val.replace(',', '.')
-            # Filtro rigoroso contra zeros e anos soltos
-            if val_check not in ["0.00", "0.01", "00.00", "20.24", "20.25", "20.26", "20.27"]: 
-                v_str = re.sub(r'[.,]', '', val[:-3]) + '.' + val[-2:] if len(val)>3 and val[-3] in '.,' else re.sub(r'[.,]', '', val)
-                v_f = float(v_str)
-                if v_f > 0:
-                    valores_float.append(v_f)
-        
-        # Fallback Inteiros (Ex: R$ 51000)
-        match_inteiros = re.findall(r'R\$\s*(\d{2,10}(?:[.,]\d{3})*)', texto_limpo)
-        for val in match_inteiros:
-            v_str = re.sub(r'[.,]', '', val)
+            v_str = re.sub(r'[.,]', '', val[:-3]) + '.' + val[-2:] if len(val)>3 and val[-3] in '.,' else re.sub(r'[.,]', '', val)
             v_f = float(v_str)
-            if v_f > 0:
+            if v_f > 0.05 and v_f not in [20.24, 20.25, 20.26]: # Ignora anos e lixo
                 valores_float.append(v_f)
-                
-        # Fallback Nome do Arquivo (Ex: NF_92_R_51000)
-        if file_name:
-            match_val_nome = re.search(r'_R\$?[_ -]*(\d{2,10})(?:\b|_|\.)', file_name.upper())
-            if match_val_nome:
-                v_f = float(match_val_nome.group(1))
-                if v_f > 0:
-                    valores_float.append(v_f)
-                
+        
         if valores_float:
             dados["valor_total"] = max(valores_float)
             
-        # ---------------------------------------------------------
-        # VALIDAÇÃO FINAL (Tolerância de CPF Ativada)
-        # ---------------------------------------------------------
-        # Se for um recibo de pessoa física sem CPF na folha, atribuímos o CPF genérico 
-        # para APROVAR a nota e deixar o Conciliador cruzar pelo Nome/Valor/Data.
-        if not dados["cnpj_forn"]:
-            dados["cnpj_forn"] = "00000000000000"
-            
-        if dados["doc"] is not None and dados["valor_total"] is not None and dados["valor_total"] > 0:
+        # Validação Final
+        if dados["doc"] is not None and dados["valor_total"] is not None:
             return dados, None
         else:
-            return None, f"Leitura Incompleta -> Doc:{dados.get('doc')} | CPF/CNPJ:{dados.get('cnpj_forn')} | R$:{dados.get('valor_total')}"
+            return None, f"Incompleto -> Doc:{dados.get('doc')} | R$:{dados.get('valor_total')}"
             
     except Exception as e:
-        return None, f"Erro no Motor Offline: {str(e)}"
+        return None, f"Erro Técnico: {str(e)}"
 
 # ==========================================
-# MOTOR IA (GEMINI) - FALLBACK COM DETETIVE DE ERROS
+# MOTOR IA (GEMINI) - FALLBACK
 # ==========================================
 DEFAULT_KEY = "" 
 
 def call_gemini_api_direct(file_name, file_bytes, model_name, api_key, status_placeholder):
-    if not api_key: return None, "Chave de API ausente. Insira uma nova chave válida."
+    if not api_key: return None, "Chave de API ausente."
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key.strip()}"
     base64_data = base64.b64encode(file_bytes).decode('utf-8')
-    prompt = """Extraia os dados desta Nota Fiscal de Serviço. Responda APENAS com um objeto JSON válido.
-    Campos exatos: {"doc": 162, "serie": "1", "data": "01/03/2026", "cnpj_forn": "14243715000180", "valor_total": 16018.50, "aliq_icms": 0.0}"""
+    prompt = """Extraia os dados desta Nota Fiscal de Serviço em JSON.
+    Campos: {"doc": 123, "serie": "1", "data": "01/01/2026", "cnpj_forn": "00000000000000", "valor_total": 1500.0, "aliq_icms": 0.0}"""
     payload = {"contents": [{"parts": [{"text": prompt}, {"inlineData": {"mimeType": "application/pdf", "data": base64_data}}]}]}
     
-    last_err = "Nenhum erro reportado."
-    for attempt in range(4):
-        try:
-            response = requests.post(url, json=payload, timeout=120)
-            if response.status_code == 200:
-                resp_json = response.json()
-                
-                if 'candidates' not in resp_json or not resp_json['candidates']:
-                    last_err = "IA não enviou candidatos na resposta (possível bloqueio do PDF)."
-                    time.sleep(5)
-                    continue
-                    
-                parts = resp_json['candidates'][0].get('content', {}).get('parts', [])
-                if not parts:
-                    last_err = "Resposta da IA sem texto."
-                    time.sleep(5)
-                    continue
-                    
-                raw_text = parts[0].get('text', '')
-                json_str = JSONParser.extrair_json_puro(raw_text)
-                
-                if not json_str:
-                    last_err = "JSON não encontrado no texto da IA."
-                    time.sleep(5)
-                    continue
-                    
-                data = json.loads(json_str)
-                data['file_name'] = file_name
-                return data, None
-                
-            elif response.status_code == 400:
-                err_msg = response.json().get('error', {}).get('message', 'Formato Rejeitado')
-                if "API Key" in err_msg or "API key" in err_msg:
-                    return None, "🚨 ERRO CRÍTICO: A sua Chave de API foi bloqueada ou é inválida. Por favor, gere uma nova no Google AI Studio."
-                return None, f"Erro 400 do Google: {err_msg}"
-            elif response.status_code == 404:
-                return None, f"Erro HTTP 404: Modelo '{model_name}' não encontrado. Tente a opção '-latest' na barra lateral."
-            elif response.status_code == 429:
-                wait_time = 20 * (attempt + 1)
-                last_err = f"Limite de requisições excedido (Erro 429). Aguardando {wait_time}s..."
-                status_placeholder.warning(f"⏳ Cota atingida! Em pausa obrigatória por {wait_time}s...")
-                time.sleep(wait_time)
-                continue
-            elif response.status_code in [500, 503, 504]:
-                wait_time = 15 * (attempt + 1)
-                last_err = f"Servidores da Google sobrecarregados (Erro {response.status_code}). Aguardando {wait_time}s..."
-                status_placeholder.warning(f"⏳ Servidores lentos! Em pausa por {wait_time}s...")
-                time.sleep(wait_time)
-                continue
-            else:
-                last_err = f"Erro HTTP {response.status_code}"
-                time.sleep(5)
-        except json.JSONDecodeError as e:
-            last_err = f"Falha ao interpretar JSON: {str(e)}"
-            time.sleep(5)
-        except Exception as e:
-            last_err = f"Exceção técnica: {str(e)}"
-            time.sleep(5)
-            
-    return None, f"Falha na IA. Último erro: {last_err} (Dica: Se esgotou as 4 tentativas, a sua Chave atingiu o limite DIÁRIO de 1500 notas. Tente novamente amanhã)."
+    try:
+        response = requests.post(url, json=payload, timeout=60)
+        if response.status_code == 200:
+            raw_text = response.json()['candidates'][0]['content']['parts'][0]['text']
+            json_str = JSONParser.extrair_json_puro(raw_text)
+            data = json.loads(json_str)
+            data['file_name'] = file_name
+            return data, None
+        return None, f"Erro IA HTTP {response.status_code}"
+    except Exception as e:
+        return None, str(e)
 
-# --- FUNÇÕES DO DOMÍNIO SISTEMAS ---
-def limpar_cnpj(valor): return "".join(filter(str.isdigit, str(valor or "")))
-def formatar_valor(valor, casas=2):
-    try: return f"{float(valor):.{casas}f}".replace('.', ',')
-    except: return "0,00"
+# --- FUNÇÕES DOMÍNIO ---
+def limpar_cnpj(v): return "".join(filter(str.isdigit, str(v or "")))
+def formatar_valor(v): return f"{float(v):.2f}".replace('.', ',')
+
 def gerar_registro_0000(cnpj): return f"|0000|{limpar_cnpj(cnpj)}|"
 def gerar_registro_1000(nf, obs=""):
     dt = nf.get('data', '')
-    campos = ["1000", "1", limpar_cnpj(nf.get('cnpj_forn', '')), "", "1", "1102", "", str(nf.get('doc', '')), nf.get('serie', '1'), "", dt, dt, formatar_valor(nf.get('valor_total', 0)), "", obs, "C", "", "", "", "", "", "", "", "", "E"]
+    campos = ["1000", "1", limpar_cnpj(nf.get('cnpj_forn', '')), "", "1", "1102", "", str(nf.get('doc', '')), "1", "", dt, dt, formatar_valor(nf.get('valor_total', 0)), "", obs, "C", "", "", "", "", "", "", "", "", "E"]
     return "|" + "|".join(campos) + "|" + "|" * 70
 def gerar_registro_1020(nf):
-    v, aliq = nf.get('valor_total', 0), nf.get('aliq_icms', 0) or 0
-    return f"|1020|1||{formatar_valor(v)}|{formatar_valor(aliq)}|{formatar_valor(float(v) * (float(aliq) / 100))}|0,00|0,00|0,00|0,00|{formatar_valor(v)}||||"
+    v = nf.get('valor_total', 0)
+    return f"|1020|1||{formatar_valor(v)}|0,00|0,00|0,00|0,00|0,00|0,00|{formatar_valor(v)}||||"
 def gerar_registro_1300(nf, obs=""):
     return f"|1300|{nf.get('data', '')}|55|5|{formatar_valor(nf.get('valor_total', 0))}|1|{obs}|SISTEMA|"
 
-# --- INTERFACE VISUAL ---
-st.set_page_config(page_title="Domínio Automator v9.7", layout="wide")
-st.title("Importador de Notas Automatizado.")
+# --- INTERFACE ---
+st.set_page_config(page_title="Domínio Automator v9.8", layout="wide")
+st.title("⚡ Domínio Automator - V9.8")
 
 with st.sidebar:
-    st.header("⚙️ Painel de Controlo")
-    
-    st.markdown("---")
-    st.subheader("🚀 Escolha a Tecnologia:")
-    metodo = st.radio("Método de Leitura:", [
-        "1. MODO RÁPIDO (Código Offline) - RECOMENDADO", 
-        "2. MODO LENTO (Inteligência Artificial Google)"
-    ])
+    st.header("⚙️ Configurações")
+    metodo = st.radio("Método:", ["1. MODO RÁPIDO (Offline)", "2. MODO LENTO (IA)"])
     modo_offline = "RÁPIDO" in metodo
     
-    if modo_offline:
-        st.success("Técnica Híbrida v9.7 ativada. Suporte a Pessoas Físicas e Fatiamento de Valores.")
-    else:
-        st.warning("Uso da IA (Gemini). Cole uma chave válida abaixo se quiser usar a IA.")
-        api_input = st.text_input("Nova Gemini API Key", value=DEFAULT_KEY, type="password")
-        keys_list = [k.strip() for k in api_input.replace(',', '\n').split('\n') if k.strip()]
-        
-        sel_model = st.selectbox("Versão do Gemini", ["gemini-2.0-flash", "gemini-1.5-flash"], index=0)
-        delay_global = st.slider("Pausa entre notas (IA)", 2, 10, 4)
+    if not modo_offline:
+        api_input = st.text_input("Gemini Key", type="password")
     
     st.markdown("---")
-    cnpj_alvo = st.text_input("CNPJ Empresa Destino", value="33333333000191")
-    texto_observacao = st.text_input("Observação (Reg. 1000/1300)", value="")
-
-    if st.button("🔴 PARAR SISTEMA", use_container_width=True):
-        st.session_state.parar = True
+    cnpj_alvo = st.text_input("CNPJ Empresa Destino", value="40633348000130") # Ex: PIXBET
+    texto_obs = st.text_input("Observação", value="IMPORTACAO AUTOMATICA")
 
 if 'notas_finalizadas' not in st.session_state: st.session_state.notas_finalizadas = {}
 if 'falhas' not in st.session_state: st.session_state.falhas = {}
-if 'parar' not in st.session_state: st.session_state.parar = False
 
-t1, t2 = st.tabs(["🚀 Processar Fila", "💾 Gerar Importação"])
+arquivos = st.file_uploader("Arraste os PDFs aqui", type="pdf", accept_multiple_files=True)
 
-with t1:
-    arquivos = st.file_uploader("Arraste todas as suas notas PDF aqui", type="pdf", accept_multiple_files=True)
+if arquivos:
+    pendentes = [f for f in arquivos if f.name not in st.session_state.notas_finalizadas]
     
-    if arquivos:
-        total_arquivos = len(arquivos)
-        ja_processados = [f.name for f in arquivos if f.name in st.session_state.notas_finalizadas]
-        pendentes = [f for f in arquivos if f.name not in st.session_state.notas_finalizadas]
+    if st.button("🚀 PROCESSAR NOTAS"):
+        pbar = st.progress(0)
+        status_msg = st.empty()
         
-        st.info(f"📊 Lote: **{total_arquivos}** | ✅ Lidas: **{len(ja_processados)}** | ⏳ Na Fila: **{len(pendentes)}**")
-        
-        col_btn1, col_btn2 = st.columns(2)
-        btn_start = col_btn1.button("🔥 INICIAR PROCESSAMENTO GERAL", use_container_width=True)
-        if col_btn2.button("🗑️ Limpar Memória", use_container_width=True):
-            st.session_state.notas_finalizadas = {}
-            st.session_state.falhas = {}
-            st.session_state.parar = False
-            st.rerun() 
+        for idx, f in enumerate(pendentes):
+            f_bytes = f.read()
             
-        if btn_start:
-            st.session_state.parar = False
-            pbar = st.progress(0)
-            status_msg = st.empty()
-            
-            tarefas = []
-            for f in pendentes:
-                f.seek(0)
-                tarefas.append((f.name, f.read()))
-            
-            total_tarefas = len(tarefas)
-            
-            if total_tarefas == 0:
-                status_msg.warning("⚠️ Todas as notas selecionadas já foram processadas ou a lista está vazia!")
+            if modo_offline:
+                res, erro = extrair_dados_pdf_offline(f.name, f_bytes, cnpj_alvo)
             else:
-                if modo_offline:
-                    status_msg.info("⚡ A ler as notas através de código puro...")
-                    inicio = time.time()
-                    for idx, (f_name, f_bytes) in enumerate(tarefas):
-                        if st.session_state.parar: break
-                        
-                        res, erro = extrair_dados_pdf_offline(f_name, f_bytes)
-                        if res:
-                            st.session_state.notas_finalizadas[f_name] = res
-                            if f_name in st.session_state.falhas: del st.session_state.falhas[f_name]
-                        else:
-                            st.session_state.falhas[f_name] = erro
-                            
-                        pbar.progress(min((idx + 1) / total_tarefas, 1.0))
-                    
-                    tempo_total = round(time.time() - inicio, 2)
-                    if not st.session_state.parar:
-                        status_msg.success(f"🎉 Leitura Concluída em {tempo_total} segundos!")
-                
-                else:
-                    if not keys_list:
-                        status_msg.error("Cole uma nova Chave de API na barra lateral para usar a IA.")
-                    else:
-                        key_index = 0
-                        for idx, (f_name, f_bytes) in enumerate(tarefas):
-                            if st.session_state.parar: break
-                            current_key = keys_list[key_index % len(keys_list)]
-                            status_msg.markdown(f"🧠 IA a ler nota **{idx + 1}/{total_tarefas}**: `{f_name}`")
-                            
-                            res, erro = call_gemini_api_direct(f_name, f_bytes, sel_model, current_key, status_msg)
-                            if res:
-                                st.session_state.notas_finalizadas[f_name] = res
-                                if f_name in st.session_state.falhas: del st.session_state.falhas[f_name]
-                            else:
-                                st.session_state.falhas[f_name] = erro
-                                if "429" in str(erro) and len(keys_list) > 1: key_index += 1
-                                if "ERRO CRÍTICO" in str(erro): 
-                                    break 
-                                
-                            pbar.progress(min((idx + 1) / total_tarefas, 1.0))
-                            status_msg.markdown(f"⏱️ Pausa de {delay_global}s...")
-                            time.sleep(delay_global)
-                        if not st.session_state.parar:
-                            status_msg.success("🎉 Leitura IA Concluída!")
+                res, erro = call_gemini_api_direct(f.name, f_bytes, "gemini-1.5-flash", api_input, status_msg)
+            
+            if res:
+                st.session_state.notas_finalizadas[f.name] = res
+                if f.name in st.session_state.falhas: del st.session_state.falhas[f.name]
+            else:
+                st.session_state.falhas[f.name] = erro
+            
+            pbar.progress((idx + 1) / len(pendentes))
+        
+        st.rerun()
 
-    if st.session_state.falhas:
-        with st.expander(f"⚠️ Notas com Falha ({len(st.session_state.falhas)}) - Verifique o motivo!", expanded=True):
-            st.table(pd.DataFrame([{"Arquivo": k, "Motivo": v} for k, v in st.session_state.falhas.items()]))
+if st.session_state.falhas:
+    with st.expander("⚠️ Falhas", expanded=True):
+        st.table(pd.DataFrame([{"Arquivo": k, "Motivo": v} for k, v in st.session_state.falhas.items()]))
 
-    if st.session_state.notas_finalizadas:
-        st.subheader("✅ Notas Lidas")
-        df_ok = pd.DataFrame(list(st.session_state.notas_finalizadas.values()))
-        st.dataframe(df_ok[['doc', 'cnpj_forn', 'valor_total', 'data', 'file_name']], use_container_width=True)
-
-with t2:
-    if st.session_state.notas_finalizadas:
-        st.subheader("Exportar para Sistema Domínio")
-        buffer = [gerar_registro_0000(cnpj_alvo)]
-        for nf in st.session_state.notas_finalizadas.values():
-            buffer.append(gerar_registro_1000(nf, texto_observacao))
-            buffer.append(gerar_registro_1020(nf))
-            buffer.append(gerar_registro_1300(nf, texto_observacao))
-        txt_final = "\r\n".join(buffer)
-        st.download_button(
-            label=f"📥 Transferir Ficheiro de Importação ({len(st.session_state.notas_finalizadas)} Notas)",
-            data=txt_final.encode('latin-1', errors='replace'),
-            file_name=f"lote_dominio_V9.7_{datetime.now().strftime('%H%M')}.txt",
-            mime="text/plain",
-            use_container_width=True
-        )
+if st.session_state.notas_finalizadas:
+    st.subheader("✅ Notas Lidas")
+    df_ok = pd.DataFrame(list(st.session_state.notas_finalizadas.values()))
+    st.dataframe(df_ok[['doc', 'cnpj_forn', 'valor_total', 'data', 'file_name']], use_container_width=True)
+    
+    buffer = [gerar_registro_0000(cnpj_alvo)]
+    for nf in st.session_state.notas_finalizadas.values():
+        buffer.append(gerar_registro_1000(nf, texto_obs))
+        buffer.append(gerar_registro_1020(nf))
+        buffer.append(gerar_registro_1300(nf, texto_obs))
+    
+    st.download_button("📥 Baixar Arquivo Domínio", "\r\n".join(buffer), f"importacao_{datetime.now().strftime('%H%M')}.txt")
 
 st.divider()
-st.caption("by Albert - Suporte a CPF e Arrastão Supremo V9.7.")
+st.caption("v9.8 - Motor de CNPJ Elástico com Filtro de Destino.")
