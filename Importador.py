@@ -7,7 +7,7 @@ import time
 import requests
 import re
 import io
-import PyPDF2 
+import PyPDF2
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -26,10 +26,6 @@ class JSONParser:
 # MOTOR OFFLINE - TÉCNICA HÍBRIDA (V10.2)
 # ==========================================
 def extrair_dados_pdf_offline(file_name, file_bytes, cnpj_destino_usuario):
-    """
-    Lê o PDF com precisão cirúrgica. V10.2: Otimizado para layouts da Paraíba (Serra Branca),
-    suporte a acentos em rótulos e filtro de exclusão de CNPJ Tomador.
-    """
     try:
         leitor = PyPDF2.PdfReader(io.BytesIO(file_bytes))
         texto_bruto = ""
@@ -39,41 +35,34 @@ def extrair_dados_pdf_offline(file_name, file_bytes, cnpj_destino_usuario):
                 texto_bruto += extraido + " "
                 
         if len(texto_bruto.strip()) < 50:
-            return None, "PDF é uma imagem escaneada ou ilegível. Utilize o modo de Inteligência Artificial."
+            return None, "PDF ilegível ou imagem. Use o modo IA."
             
-        # TEXTO LIMPO: Mantém espaços, padroniza maiúsculas e remove acentos
         texto_limpo = re.sub(r'\s+', ' ', texto_bruto).upper()
         texto_limpo = ''.join(c for c in unicodedata.normalize('NFD', texto_limpo) if unicodedata.category(c) != 'Mn')
-        
-        # TEXTO DENSO: Remove espaços para padrões rígidos
         texto_denso = texto_limpo.replace(' ', '')
         
-        dados = {"doc": None, "serie": "1", "data": None, "cnpj_forn": None, "valor_total": None, "aliq_icms": 0.0, "file_name": file_name}
+        dados = {
+            "doc": None, 
+            "serie": "1", 
+            "data": None, 
+            "cnpj_forn": None, 
+            "valor_total": None, 
+            "acumulador": "1", # Valor padrão inicial
+            "file_name": file_name
+        }
         
-        # ---------------------------------------------------------
-        # 1. CNPJ / CPF Emitente (Lógica de Exclusão Tomador)
-        # ---------------------------------------------------------
         cnpj_alvo_limpo = "".join(filter(str.isdigit, str(cnpj_destino_usuario)))
-        
-        # Procura CNPJ (14) ou CPF (11) no texto denso
         todos_numeros_longos = re.findall(r'\d{14}|\d{11}', texto_denso)
         
-        # Filtro: O Fornecedor é quem NÃO é o alvo (PIXBET) e NÃO é uma sequência de zeros
-        for doc in list(dict.fromkeys(todos_numeros_longos)): # Remove duplicados mantendo ordem
-            if doc != cnpj_alvo_limpo and doc != "00000000000000" and not doc.startswith("25155"): # 25155 costuma ser lixo de cod. verificação
+        for doc in list(dict.fromkeys(todos_numeros_longos)):
+            if doc != cnpj_alvo_limpo and doc != "00000000000000" and not doc.startswith("25155"):
                 dados["cnpj_forn"] = doc
                 break
         
         if not dados["cnpj_forn"]:
-            # Fallback se só encontrou um documento e é o alvo (casos raros de nota de devolução)
-            if todos_numeros_longos: dados["cnpj_forn"] = todos_numeros_longos[0]
-            else: dados["cnpj_forn"] = "00000000000000"
+            dados["cnpj_forn"] = todos_numeros_longos[0] if todos_numeros_longos else "00000000000000"
 
-        # ---------------------------------------------------------
-        # 2. NÚMERO DO DOCUMENTO (Suporte a Acentos e Topo da Nota)
-        # ---------------------------------------------------------
         doc_str = None
-        # Rótulos estendidos incluindo NUMERO com e sem acento
         padroes_doc = [
             r"NUMERO DA NFS-E[^\d]{0,50}?0*(\d+)",
             r"NUMERO DA NOTA[^\d]{0,50}?0*(\d+)",
@@ -81,9 +70,6 @@ def extrair_dados_pdf_offline(file_name, file_bytes, cnpj_destino_usuario):
             r"DANF-?E[^\d]{0,30}?0*(\d+)",
             r"NUMERO[^\d]{0,50}?0*(\d+)",
             r"NF-?E?\s*[:.-]?\s*0*(\d+)",
-            r"NOTA[^\d]{0,30}?0*(\d+)",
-            r"FATURA[^\d]{0,30}?0*(\d+)",
-            r"RECIBO[^\d]{0,30}?0*(\d+)"
         ]
         
         for padrao in padroes_doc:
@@ -94,86 +80,48 @@ def extrair_dados_pdf_offline(file_name, file_bytes, cnpj_destino_usuario):
                     break
             if doc_str: break
 
-        # Busca por número órfão no topo (Layouts onde o número está "solto" no cabeçalho)
-        if not doc_str:
-            numeros_candidatos = re.findall(r"(?<!/)\b0*(\d{1,9})\b(?!/)", texto_limpo[:1000])
-            for n in numeros_candidatos:
-                if n not in ['2024', '2025', '2026', '2027', '0'] and len(n) >= 2:
-                    doc_str = n
-                    break
-
-        if not doc_str and file_name:
-            match_nome = re.search(r'(?:NFS-?E|NFSE|NF-?E|DANF-?E|NOTA|FATURA|NF)[_ -]*[Nn]?[Oo]?[_ -]*0*(\d+)', file_name.upper())
-            if match_nome: doc_str = match_nome.group(1)
-
         if doc_str: dados["doc"] = int(doc_str)
-
-        # ---------------------------------------------------------
-        # 3. DATA
-        # ---------------------------------------------------------
         data_match = re.search(r"(\d{2}/\d{2}/\d{4})", texto_denso)
         if data_match: dados["data"] = data_match.group(1)
 
-        # ---------------------------------------------------------
-        # 4. VALOR TOTAL (Suporte a RS e Fatiador)
-        # ---------------------------------------------------------
-        # Aceita R$, RS ou apenas o valor. Suporta 1.000,00 ou 1000.00
         regex_dinheiro = r"\b\d{1,10}(?:[.,]\d{3})*[.,]\d{2}\b"
         todos_brutos = re.findall(regex_dinheiro, texto_limpo)
         valores_float = []
         
         for bruto in todos_brutos:
-            # Fatia "Salsichas Numéricas" (ex: 233.333,330,00)
-            if bruto.count(',') >= 2 or (',' in bruto and '.' in bruto and bruto.find(',') < bruto.find('.')):
-                partes = re.split(r'[.,]', bruto)
-                corrigido = partes[0] + "," + partes[1][:2]
-            else:
-                corrigido = bruto
-                
-            v_str = re.sub(r'[.,]', '', corrigido[:-3]) + '.' + corrigido[-2:] if len(corrigido)>3 and corrigido[-3] in '.,' else re.sub(r'[.,]', '', corrigido)
+            v_str = re.sub(r'[.,]', '', bruto[:-3]) + '.' + bruto[-2:] if len(bruto)>3 else bruto
             try:
                 v_f = float(v_str)
-                # Filtra anos e lixo de sistema
-                if 0.50 < v_f < 99000000.0 and v_f not in [2024.0, 2025.0, 2026.0, 2027.0]:
-                    valores_float.append(v_f)
+                if 0.50 < v_f < 99000000.0: valores_float.append(v_f)
             except: continue
         
-        if valores_float:
-            dados["valor_total"] = max(valores_float)
+        if valores_float: dados["valor_total"] = max(valores_float)
             
-        # Validação Final
-        if dados["doc"] is not None and dados["valor_total"] is not None:
+        if dados["doc"] and dados["valor_total"]:
             return dados, None
-        else:
-            return None, f"Incompleto -> Doc:{dados.get('doc')} | R$:{dados.get('valor_total')}"
-            
+        return None, "Dados insuficientes no PDF."
     except Exception as e:
-        return None, f"Erro Técnico: {str(e)}"
+        return None, f"Erro: {str(e)}"
 
 # ==========================================
-# MOTOR IA (GEMINI) - FALLBACK (V10.2 2.0 READY)
+# MOTOR IA (GEMINI)
 # ==========================================
 def call_gemini_api_direct(file_name, file_bytes, model_name, api_key):
     if not api_key: return None, "Chave de API ausente."
-    clean_model = model_name.strip()
-    # Endpoint de geração de conteúdo
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={api_key.strip()}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     base64_data = base64.b64encode(file_bytes).decode('utf-8')
     prompt = """Extraia os dados desta Nota Fiscal em formato JSON. 
-    Campos exatos: {"doc": 123, "serie": "1", "data": "01/01/2026", "cnpj_forn": "00000000000000", "valor_total": 1500.0, "aliq_icms": 0.0}"""
+    Campos: {"doc": 123, "serie": "1", "data": "01/01/2026", "cnpj_forn": "00000000000000", "valor_total": 1500.0, "acumulador": "1"}"""
     payload = {"contents": [{"parts": [{"text": prompt}, {"inlineData": {"mimeType": "application/pdf", "data": base64_data}}]}]}
     
     try:
         response = requests.post(url, json=payload, timeout=90)
         if response.status_code == 200:
             raw_text = response.json()['candidates'][0]['content']['parts'][0]['text']
-            json_str = JSONParser.extrair_json_puro(raw_text)
-            data = json.loads(json_str)
+            data = json.loads(JSONParser.extrair_json_puro(raw_text))
             data['file_name'] = file_name
             return data, None
-        elif response.status_code == 404:
-            return None, f"Erro 404: O modelo '{clean_model}' não foi encontrado. Tente gemini-1.5-flash."
-        return None, f"Erro IA HTTP {response.status_code}: {response.text[:100]}"
+        return None, f"Erro API: {response.status_code}"
     except Exception as e:
         return None, f"Falha na IA: {str(e)}"
 
@@ -182,19 +130,28 @@ def limpar_cnpj(v): return "".join(filter(str.isdigit, str(v or "")))
 def formatar_valor(v): return f"{float(v):.2f}".replace('.', ',')
 
 def gerar_registro_0000(cnpj): return f"|0000|{limpar_cnpj(cnpj)}|"
+
 def gerar_registro_1000(nf, obs=""):
     dt = nf.get('data', '')
-    campos = ["1000", "1", limpar_cnpj(nf.get('cnpj_forn', '')), "", "1", "1102", "", str(nf.get('doc', '') or ""), "1", "", dt, dt, formatar_valor(nf.get('valor_total', 0)), "", obs, "C", "", "", "", "", "", "", "", "", "E"]
+    acum = str(nf.get('acumulador', '1'))
+    # O campo do acumulador no layout Domínio costuma ser o 6º campo (substituindo 1102 aqui)
+    campos = ["1000", "1", limpar_cnpj(nf.get('cnpj_forn', '')), "", "1", acum, "", str(nf.get('doc', '') or ""), "1", "", dt, dt, formatar_valor(nf.get('valor_total', 0)), "", obs, "C", "", "", "", "", "", "", "", "", "E"]
     return "|" + "|".join(campos) + "|" + "|" * 70
+
 def gerar_registro_1020(nf):
     v = nf.get('valor_total', 0)
     return f"|1020|1||{formatar_valor(v)}|0,00|0,00|0,00|0,00|0,00|0,00|{formatar_valor(v)}||||"
+
 def gerar_registro_1300(nf, obs=""):
     return f"|1300|{nf.get('data', '')}|55|5|{formatar_valor(nf.get('valor_total', 0))}|1|{obs}|SISTEMA|"
 
 # --- INTERFACE ---
-st.set_page_config(page_title="Domínio Automator v10.2", layout="wide")
-st.title("⚡ Domínio Automator - V10.2 (Gemini 2.0 Edition)")
+st.set_page_config(page_title="Domínio Automator v10.3", layout="wide")
+st.title("⚡ Domínio Automator - V10.3 (Confronto de Acumuladores)")
+
+# Inicialização de estados
+if 'notas_finalizadas' not in st.session_state: st.session_state.notas_finalizadas = []
+if 'falhas' not in st.session_state: st.session_state.falhas = {}
 
 with st.sidebar:
     st.header("⚙️ Configurações")
@@ -203,57 +160,118 @@ with st.sidebar:
     
     if not modo_offline:
         api_input = st.text_input("Gemini API Key", type="password")
-        model_choice = st.selectbox("Modelo:", ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"], index=0)
+        model_choice = st.selectbox("Modelo:", ["gemini-2.0-flash", "gemini-1.5-flash"], index=0)
     
     st.markdown("---")
-    cnpj_alvo = st.text_input("CNPJ Empresa Destino", value="40633348000130") # Ex: PIXBET
+    cnpj_alvo = st.text_input("CNPJ Empresa Destino", value="40633348000130")
     texto_obs = st.text_input("Observação", value="IMPORTACAO AUTOMATICA")
-
-if 'notas_finalizadas' not in st.session_state: st.session_state.notas_finalizadas = {}
-if 'falhas' not in st.session_state: st.session_state.falhas = {}
-
-arquivos = st.file_uploader("Arraste os PDFs aqui", type="pdf", accept_multiple_files=True)
-
-if arquivos:
-    pendentes = [f for f in arquivos if f.name not in st.session_state.notas_finalizadas]
     
-    if st.button("🚀 PROCESSAR LOTE"):
+    if st.button("🗑️ Limpar Tudo"):
+        st.session_state.notas_finalizadas = []
+        st.session_state.falhas = {}
+        st.rerun()
+
+# --- PASSO 1: IMPORTAR PDFs ---
+st.subheader("1️⃣ Importar Notas (PDF)")
+arquivos_pdf = st.file_uploader("Arraste os PDFs das notas aqui", type="pdf", accept_multiple_files=True)
+
+if arquivos_pdf:
+    nomes_processados = [n['file_name'] for n in st.session_state.notas_finalizadas]
+    pendentes = [f for f in arquivos_pdf if f.name not in nomes_processados]
+    
+    if pendentes and st.button("🚀 PROCESSAR PDFs"):
         pbar = st.progress(0)
-        
         for idx, f in enumerate(pendentes):
             f_bytes = f.read()
-            
             if modo_offline:
                 res, erro = extrair_dados_pdf_offline(f.name, f_bytes, cnpj_alvo)
             else:
                 res, erro = call_gemini_api_direct(f.name, f_bytes, model_choice, api_input)
             
             if res:
-                st.session_state.notas_finalizadas[f.name] = res
-                if f.name in st.session_state.falhas: del st.session_state.falhas[f.name]
+                st.session_state.notas_finalizadas.append(res)
             else:
                 st.session_state.falhas[f.name] = erro
-            
             pbar.progress((idx + 1) / len(pendentes))
-        
         st.rerun()
 
-if st.session_state.falhas:
-    with st.expander("⚠️ Falhas detetadas", expanded=True):
-        st.table(pd.DataFrame([{"Arquivo": k, "Motivo": v} for k, v in st.session_state.falhas.items()]))
+# --- PASSO 2: CONFRONTAR COM EXCEL ---
+st.subheader("2️⃣ Confrontar com Mês Anterior (Excel)")
+col1, col2 = st.columns([1, 2])
 
+with col1:
+    arquivo_excel = st.file_uploader("Upload Excel do mês anterior", type=["xlsx", "xls"])
+    st.caption("O Excel deve conter colunas: 'CNPJ' e 'Acumulador'")
+
+# Lógica de Cruzamento
+if arquivo_excel and st.session_state.notas_finalizadas:
+    try:
+        df_ref = pd.read_excel(arquivo_excel)
+        # Padroniza colunas do excel para match
+        df_ref.columns = [c.upper() for c in df_ref.columns]
+        
+        if 'CNPJ' in df_ref.columns and 'ACUMULADOR' in df_ref.columns:
+            # Criar dicionário de De-Para {CNPJ: Acumulador}
+            df_ref['CNPJ_CLEAN'] = df_ref['CNPJ'].apply(lambda x: limpar_cnpj(str(x)))
+            de_para = dict(zip(df_ref['CNPJ_CLEAN'], df_ref['ACUMULADOR']))
+            
+            # Aplicar cruzamento
+            for nota in st.session_state.notas_finalizadas:
+                cnpj_f = limpar_cnpj(nota['cnpj_forn'])
+                if cnpj_f in de_para:
+                    nota['acumulador'] = str(de_para[cnpj_f])
+            
+            st.success("✅ Confronto realizado! Acumuladores atualizados com base no Excel.")
+        else:
+            st.error("O Excel precisa ter as colunas 'CNPJ' e 'ACUMULADOR'.")
+    except Exception as e:
+        st.error(f"Erro ao ler Excel: {e}")
+
+# --- PASSO 3: EDIÇÃO E EXPORTAÇÃO ---
 if st.session_state.notas_finalizadas:
-    st.subheader("✅ Notas Lidas")
-    df_ok = pd.DataFrame(list(st.session_state.notas_finalizadas.values()))
-    st.dataframe(df_ok[['doc', 'cnpj_forn', 'valor_total', 'data', 'file_name']], use_container_width=True)
+    st.subheader("3️⃣ Revisar e Alterar Acumuladores")
+    st.info("Você pode clicar duas vezes na coluna 'acumulador' para alterar os valores manualmente abaixo.")
     
-    buffer = [gerar_registro_0000(cnpj_alvo)]
-    for nf in st.session_state.notas_finalizadas.values():
-        buffer.append(gerar_registro_1000(nf, texto_obs))
-        buffer.append(gerar_registro_1020(nf))
-        buffer.append(gerar_registro_1300(nf, texto_obs))
+    df_preview = pd.DataFrame(st.session_state.notas_finalizadas)
     
-    st.download_button("📥 Baixar Arquivo Domínio", "\r\n".join(buffer), f"importacao_{datetime.now().strftime('%H%M')}.txt", use_container_width=True)
+    # Ordem das colunas para o editor
+    cols = ['doc', 'cnpj_forn', 'acumulador', 'valor_total', 'data', 'file_name']
+    
+    # Editor de dados interativo (Excel-like)
+    df_editado = st.data_editor(
+        df_preview[cols],
+        column_config={
+            "acumulador": st.column_config.TextColumn("Acumulador (Código)", help="Código de ajuste no Domínio"),
+            "doc": st.column_config.NumberColumn("Documento", disabled=True),
+            "valor_total": st.column_config.NumberColumn("Valor R$", format="%.2f", disabled=True),
+            "cnpj_forn": st.column_config.TextColumn("CNPJ Fornecedor", disabled=True)
+        },
+        use_container_width=True,
+        hide_index=True,
+        key="editor_notas"
+    )
+
+    if st.button("💾 GERAR ARQUIVO DOMÍNIO"):
+        buffer = [gerar_registro_0000(cnpj_alvo)]
+        # Usamos os dados do df_editado (que contém as alterações manuais do usuário)
+        for _, nf in df_editado.iterrows():
+            buffer.append(gerar_registro_1000(nf, texto_obs))
+            buffer.append(gerar_registro_1020(nf))
+            buffer.append(gerar_registro_1300(nf, texto_obs))
+        
+        txt_final = "\r\n".join(buffer)
+        st.download_button(
+            label="📥 Baixar Arquivo .TXT",
+            data=txt_final,
+            file_name=f"importacao_dominio_{datetime.now().strftime('%d%m_%H%M')}.txt",
+            mime="text/plain",
+            use_container_width=True
+        )
+
+# Exibição de Erros
+if st.session_state.falhas:
+    with st.expander("⚠️ Falhas de Leitura"):
+        st.table([{"Arquivo": k, "Erro": v} for k, v in st.session_state.falhas.items()])
 
 st.divider()
-st.caption("v10.2 - Suporte Nativo Gemini 2.0 e Blindagem Paraíba.")
+st.caption("Domínio Automator v10.3 - Módulo de Inteligência de Acumuladores.")
