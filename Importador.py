@@ -47,7 +47,7 @@ def extrair_dados_pdf_offline(file_name, file_bytes, cnpj_destino_usuario):
             "data": None, 
             "cnpj_forn": None, 
             "valor_total": None, 
-            "acumulador": "1", # Valor padrão inicial
+            "acumulador": "1", # Valor padrão
             "file_name": file_name
         }
         
@@ -134,7 +134,6 @@ def gerar_registro_0000(cnpj): return f"|0000|{limpar_cnpj(cnpj)}|"
 def gerar_registro_1000(nf, obs=""):
     dt = nf.get('data', '')
     acum = str(nf.get('acumulador', '1'))
-    # O campo do acumulador no layout Domínio costuma ser o 6º campo (substituindo 1102 aqui)
     campos = ["1000", "1", limpar_cnpj(nf.get('cnpj_forn', '')), "", "1", acum, "", str(nf.get('doc', '') or ""), "1", "", dt, dt, formatar_valor(nf.get('valor_total', 0)), "", obs, "C", "", "", "", "", "", "", "", "", "E"]
     return "|" + "|".join(campos) + "|" + "|" * 70
 
@@ -146,16 +145,16 @@ def gerar_registro_1300(nf, obs=""):
     return f"|1300|{nf.get('data', '')}|55|5|{formatar_valor(nf.get('valor_total', 0))}|1|{obs}|SISTEMA|"
 
 # --- INTERFACE ---
-st.set_page_config(page_title="Domínio Automator v10.3", layout="wide")
-st.title("⚡ Domínio Automator - V10.3 (Confronto de Acumuladores)")
+st.set_page_config(page_title="Domínio Automator v10.4", layout="wide")
+st.title("⚡ Domínio Automator - V10.4")
 
 # Inicialização de estados
 if 'notas_finalizadas' not in st.session_state: st.session_state.notas_finalizadas = []
 if 'falhas' not in st.session_state: st.session_state.falhas = {}
 
 with st.sidebar:
-    st.header("⚙️ Configurações")
-    metodo = st.radio("Tecnologia:", ["1. MODO RÁPIDO (Offline)", "2. MODO LENTO (IA)"])
+    st.header("⚙️ Configurações Gerais")
+    metodo = st.radio("Tecnologia de Leitura:", ["1. MODO RÁPIDO (Offline)", "2. MODO LENTO (IA)"])
     modo_offline = "RÁPIDO" in metodo
     
     if not modo_offline:
@@ -164,106 +163,116 @@ with st.sidebar:
     
     st.markdown("---")
     cnpj_alvo = st.text_input("CNPJ Empresa Destino", value="40633348000130")
-    texto_obs = st.text_input("Observação", value="IMPORTACAO AUTOMATICA")
+    texto_obs = st.text_input("Observação Padrão", value="IMPORTACAO AUTOMATICA")
     
-    if st.button("🗑️ Limpar Tudo"):
+    if st.button("🗑️ Limpar Todos os Dados"):
         st.session_state.notas_finalizadas = []
         st.session_state.falhas = {}
         st.rerun()
 
-# --- PASSO 1: IMPORTAR PDFs ---
-st.subheader("1️⃣ Importar Notas (PDF)")
-arquivos_pdf = st.file_uploader("Arraste os PDFs das notas aqui", type="pdf", accept_multiple_files=True)
+# --- SEPARAÇÃO DAS FUNCIONALIDADES EM ABAS ---
+tab1, tab2 = st.tabs(["📄 Importação Simples", "🔍 Confronto com Mês Anterior"])
 
-if arquivos_pdf:
-    nomes_processados = [n['file_name'] for n in st.session_state.notas_finalizadas]
-    pendentes = [f for f in arquivos_pdf if f.name not in nomes_processados]
+# ---------------------------------------------------------
+# ABA 1: IMPORTAÇÃO SIMPLES
+# ---------------------------------------------------------
+with tab1:
+    st.subheader("Processamento Direto de Notas")
+    arquivos_simples = st.file_uploader("Arraste os PDFs para importação direta", type="pdf", accept_multiple_files=True, key="up_simples")
     
-    if pendentes and st.button("🚀 PROCESSAR PDFs"):
-        pbar = st.progress(0)
-        for idx, f in enumerate(pendentes):
-            f_bytes = f.read()
-            if modo_offline:
-                res, erro = extrair_dados_pdf_offline(f.name, f_bytes, cnpj_alvo)
-            else:
-                res, erro = call_gemini_api_direct(f.name, f_bytes, model_choice, api_input)
-            
-            if res:
-                st.session_state.notas_finalizadas.append(res)
-            else:
-                st.session_state.falhas[f.name] = erro
-            pbar.progress((idx + 1) / len(pendentes))
+    if arquivos_simples:
+        nomes_proc = [n['file_name'] for n in st.session_state.notas_finalizadas]
+        pendentes = [f for f in arquivos_simples if f.name not in nomes_proc]
+        
+        if pendentes and st.button("🚀 Processar Notas (Simples)", key="btn_simples"):
+            pbar = st.progress(0)
+            for idx, f in enumerate(pendentes):
+                f_bytes = f.read()
+                res, erro = extrair_dados_pdf_offline(f.name, f_bytes, cnpj_alvo) if modo_offline else call_gemini_api_direct(f.name, f_bytes, model_choice, api_input)
+                if res: st.session_state.notas_finalizadas.append(res)
+                else: st.session_state.falhas[f.name] = erro
+                pbar.progress((idx + 1) / len(pendentes))
+            st.rerun()
+
+# ---------------------------------------------------------
+# ABA 2: CONFRONTO COM MÊS ANTERIOR
+# ---------------------------------------------------------
+with tab2:
+    st.subheader("Processamento com Cruzamento de Dados")
+    col_a, col_b = st.columns(2)
+    
+    with col_a:
+        arquivos_confronto = st.file_uploader("1. PDFs das Notas", type="pdf", accept_multiple_files=True, key="up_conf_pdf")
+    with col_b:
+        arquivo_excel = st.file_uploader("2. Excel do Mês Anterior", type=["xlsx", "xls"], key="up_conf_excel")
+        st.caption("Colunas esperadas: 'CNPJ' e 'Acumulador'")
+
+    if arquivos_confronto and st.button("🚀 Processar e Confrontar", key="btn_confronto"):
+        # 1. Processar PDFs
+        nomes_proc = [n['file_name'] for n in st.session_state.notas_finalizadas]
+        pendentes = [f for f in arquivos_confronto if f.name not in nomes_proc]
+        
+        if pendentes:
+            for f in pendentes:
+                f_bytes = f.read()
+                res, erro = extrair_dados_pdf_offline(f.name, f_bytes, cnpj_alvo) if modo_offline else call_gemini_api_direct(f.name, f_bytes, model_choice, api_input)
+                if res: st.session_state.notas_finalizadas.append(res)
+                else: st.session_state.falhas[f.name] = erro
+        
+        # 2. Aplicar Confronto se o Excel existir
+        if arquivo_excel:
+            try:
+                df_ref = pd.read_excel(arquivo_excel)
+                df_ref.columns = [c.upper().strip() for c in df_ref.columns]
+                
+                if 'CNPJ' in df_ref.columns and 'ACUMULADOR' in df_ref.columns:
+                    df_ref['CNPJ_CLEAN'] = df_ref['CNPJ'].apply(lambda x: limpar_cnpj(str(x)))
+                    de_para = dict(zip(df_ref['CNPJ_CLEAN'], df_ref['ACUMULADOR']))
+                    
+                    for nota in st.session_state.notas_finalizadas:
+                        cnpj_f = limpar_cnpj(nota['cnpj_forn'])
+                        if cnpj_f in de_para:
+                            nota['acumulador'] = str(de_para[cnpj_f])
+                    st.success("✅ Confronto realizado com sucesso!")
+                else:
+                    st.error("Excel sem as colunas 'CNPJ' e 'ACUMULADOR'.")
+            except Exception as e:
+                st.error(f"Erro no Excel: {e}")
         st.rerun()
 
-# --- PASSO 2: CONFRONTAR COM EXCEL ---
-st.subheader("2️⃣ Confrontar com Mês Anterior (Excel)")
-col1, col2 = st.columns([1, 2])
-
-with col1:
-    arquivo_excel = st.file_uploader("Upload Excel do mês anterior", type=["xlsx", "xls"])
-    st.caption("O Excel deve conter colunas: 'CNPJ' e 'Acumulador'")
-
-# Lógica de Cruzamento
-if arquivo_excel and st.session_state.notas_finalizadas:
-    try:
-        df_ref = pd.read_excel(arquivo_excel)
-        # Padroniza colunas do excel para match
-        df_ref.columns = [c.upper() for c in df_ref.columns]
-        
-        if 'CNPJ' in df_ref.columns and 'ACUMULADOR' in df_ref.columns:
-            # Criar dicionário de De-Para {CNPJ: Acumulador}
-            df_ref['CNPJ_CLEAN'] = df_ref['CNPJ'].apply(lambda x: limpar_cnpj(str(x)))
-            de_para = dict(zip(df_ref['CNPJ_CLEAN'], df_ref['ACUMULADOR']))
-            
-            # Aplicar cruzamento
-            for nota in st.session_state.notas_finalizadas:
-                cnpj_f = limpar_cnpj(nota['cnpj_forn'])
-                if cnpj_f in de_para:
-                    nota['acumulador'] = str(de_para[cnpj_f])
-            
-            st.success("✅ Confronto realizado! Acumuladores atualizados com base no Excel.")
-        else:
-            st.error("O Excel precisa ter as colunas 'CNPJ' e 'ACUMULADOR'.")
-    except Exception as e:
-        st.error(f"Erro ao ler Excel: {e}")
-
-# --- PASSO 3: EDIÇÃO E EXPORTAÇÃO ---
+# --- ÁREA COMUM DE REVISÃO E DOWNLOAD (Sempre visível se houver notas) ---
 if st.session_state.notas_finalizadas:
-    st.subheader("3️⃣ Revisar e Alterar Acumuladores")
-    st.info("Você pode clicar duas vezes na coluna 'acumulador' para alterar os valores manualmente abaixo.")
+    st.divider()
+    st.subheader("📝 Revisão Final e Ajustes")
+    st.info("Ajuste os códigos na coluna 'Acumulador' se necessário antes de baixar.")
     
     df_preview = pd.DataFrame(st.session_state.notas_finalizadas)
-    
-    # Ordem das colunas para o editor
     cols = ['doc', 'cnpj_forn', 'acumulador', 'valor_total', 'data', 'file_name']
     
-    # Editor de dados interativo (Excel-like)
     df_editado = st.data_editor(
         df_preview[cols],
         column_config={
-            "acumulador": st.column_config.TextColumn("Acumulador (Código)", help="Código de ajuste no Domínio"),
-            "doc": st.column_config.NumberColumn("Documento", disabled=True),
+            "acumulador": st.column_config.TextColumn("Acumulador", help="Código no Domínio"),
+            "doc": st.column_config.NumberColumn("Nº Nota", disabled=True),
             "valor_total": st.column_config.NumberColumn("Valor R$", format="%.2f", disabled=True),
             "cnpj_forn": st.column_config.TextColumn("CNPJ Fornecedor", disabled=True)
         },
         use_container_width=True,
         hide_index=True,
-        key="editor_notas"
+        key="editor_final"
     )
 
-    if st.button("💾 GERAR ARQUIVO DOMÍNIO"):
+    if st.button("💾 GERAR ARQUIVO PARA DOMÍNIO", use_container_width=True):
         buffer = [gerar_registro_0000(cnpj_alvo)]
-        # Usamos os dados do df_editado (que contém as alterações manuais do usuário)
         for _, nf in df_editado.iterrows():
             buffer.append(gerar_registro_1000(nf, texto_obs))
             buffer.append(gerar_registro_1020(nf))
             buffer.append(gerar_registro_1300(nf, texto_obs))
         
-        txt_final = "\r\n".join(buffer)
         st.download_button(
             label="📥 Baixar Arquivo .TXT",
-            data=txt_final,
-            file_name=f"importacao_dominio_{datetime.now().strftime('%d%m_%H%M')}.txt",
+            data="\r\n".join(buffer),
+            file_name=f"importacao_{datetime.now().strftime('%d%m_%H%M')}.txt",
             mime="text/plain",
             use_container_width=True
         )
@@ -274,4 +283,4 @@ if st.session_state.falhas:
         st.table([{"Arquivo": k, "Erro": v} for k, v in st.session_state.falhas.items()])
 
 st.divider()
-st.caption("Domínio Automator v10.3 - Módulo de Inteligência de Acumuladores.")
+st.caption("Domínio Automator v10.4 - Fluxos de trabalho independentes.")
