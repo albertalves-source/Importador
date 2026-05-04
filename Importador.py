@@ -23,7 +23,7 @@ class JSONParser:
             return texto
 
 # ==========================================
-# MOTOR DE EXTRAÇÃO PDF (V10.2)
+# MOTOR DE EXTRAÇÃO PDF (ATUALIZADO V11 - Anti-Falhas)
 # ==========================================
 def extrair_dados_pdf_offline(file_name, file_bytes, cnpj_destino_usuario):
     try:
@@ -82,12 +82,11 @@ def extrair_dados_pdf_offline(file_name, file_bytes, cnpj_destino_usuario):
                 doc_str = validos[0]
                 break
 
-        # FALLBACK PARA O NOME DO ARQUIVO (Se não achar o número no texto, procura no nome do PDF)
+        # FALLBACK PARA O NOME DO ARQUIVO (Evita o erro "Dados insuficientes")
         if not doc_str:
             nums_arq = re.findall(r'\d+', file_name)
             validos_arq = [n for n in nums_arq if n not in ['2024', '2025', '2026', '2027'] and int(n) > 0]
             if validos_arq:
-                # Pega o maior número do título (útil para chaves WebISS grandes) ou o primeiro achado
                 doc_str = max(validos_arq, key=len)
                 if len(doc_str) < 1: doc_str = validos_arq[0]
 
@@ -95,18 +94,16 @@ def extrair_dados_pdf_offline(file_name, file_bytes, cnpj_destino_usuario):
             try: dados["doc"] = int(doc_str)
             except: dados["doc"] = 1
         else:
-            dados["doc"] = 1 # Fallback para não dar erro
+            dados["doc"] = 1
 
-        # DATA (Com fallback para hoje)
+        # DATA (Com fallback para hoje para não invalidar a nota)
         data_match = re.search(r"(\d{2}/\d{2}/\d{4})", texto_denso)
         if data_match: dados["data"] = data_match.group(1)
         else: dados["data"] = datetime.now().strftime("%d/%m/%Y")
 
         # BUSCA DE VALOR MAIS FLEXÍVEL
         valores_float = []
-        # Busca 1: Tenta no texto com espaços
         todos_brutos = re.findall(r"(\d{1,10}(?:[.,]\d{3})*[.,]\d{2})", texto_limpo)
-        # Busca 2: Se falhar, tenta no texto denso (sem espaços)
         if not todos_brutos:
             todos_brutos = re.findall(r"(\d{1,10}(?:[.,]\d{3})*[.,]\d{2})", texto_denso)
 
@@ -120,11 +117,11 @@ def extrair_dados_pdf_offline(file_name, file_bytes, cnpj_destino_usuario):
         
         if valores_float: dados["valor_total"] = max(valores_float)
             
-        # VALIDAÇÃO FINAL RELAXADA (Só rejeita se faltar o Valor)
+        # Validação final: Só rejeita se não encontrar o valor financeiro
         if dados["valor_total"] is not None:
             return dados, None
             
-        return None, f"Faltou Valor na leitura offline. Tente o MODO IA."
+        return None, "Faltou Valor na leitura offline. Tente o MODO IA."
     except Exception as e:
         return None, f"Erro: {str(e)}"
 
@@ -176,15 +173,23 @@ def to_excel(df):
     return output.getvalue()
 
 # --- INTERFACE ---
-st.set_page_config(page_title="Domínio Automator v10.5", layout="wide")
-st.title("⚡ Domínio Automator - V10.5")
+st.set_page_config(page_title="Domínio Automator v11", layout="wide")
+st.title("⚡ Domínio Automator - V11")
 
 # Inicialização de estados
 if 'notas_extraidas' not in st.session_state: st.session_state.notas_extraidas = []
 if 'falhas' not in st.session_state: st.session_state.falhas = {}
 
 with st.sidebar:
-    st.header("⚙️ Configurações")
+    st.header("🔀 Ferramentas (Separadas)")
+    # RADIO BUTTON PARA SEPARAR OS MÓDULOS COMPLETAMENTE
+    ferramenta = st.radio("Selecione o que deseja fazer:", [
+        "📄 1. Importar Notas (De PDF para Excel/TXT)",
+        "📊 2. Confronto e Edição (De Excel para Excel/TXT)"
+    ])
+    
+    st.markdown("---")
+    st.header("⚙️ Configurações Gerais")
     metodo = st.radio("Tecnologia de Leitura:", ["1. MODO RÁPIDO (Offline)", "2. MODO LENTO (IA)"])
     modo_offline = "RÁPIDO" in metodo
     
@@ -192,113 +197,129 @@ with st.sidebar:
         api_input = st.text_input("Gemini API Key", type="password")
         model_choice = st.selectbox("Modelo:", ["gemini-2.0-flash", "gemini-1.5-flash"], index=0)
     
-    st.markdown("---")
     cnpj_alvo = st.text_input("CNPJ Empresa Destino", value="40633348000130")
     texto_obs = st.text_input("Observação Padrão", value="IMPORTACAO AUTOMATICA")
     
-    if st.button("🗑️ Limpar Todos os Dados"):
+    if st.button("🗑️ Limpar Memória do Sistema"):
         st.session_state.notas_extraidas = []
         st.session_state.falhas = {}
         st.rerun()
 
-tab1, tab2 = st.tabs(["📊 1. Extrair PDF p/ Excel", "📥 2. Gerar TXT via Excel"])
 
-# ---------------------------------------------------------
-# ABA 1: EXTRAÇÃO (PDF -> EXCEL)
-# ---------------------------------------------------------
-with tab1:
-    st.subheader("Passo 1: Transformar PDFs em Planilha")
+# =========================================================
+# MÓDULO 1: APENAS IMPORTAÇÃO DE PDFS
+# =========================================================
+if "1. Importar Notas" in ferramenta:
+    st.subheader("📄 Módulo de Extração de PDFs")
+    st.write("Faça o upload dos PDFs. O sistema lerá os dados e permitirá que você baixe a planilha Excel ou o arquivo TXT.")
     
-    col_up1, col_up2 = st.columns(2)
-    with col_up1:
-        arquivos_pdf = st.file_uploader("1. Carregar PDFs das Notas", type="pdf", accept_multiple_files=True, key="pdf_extr")
-    with col_up2:
-        arquivo_ref = st.file_uploader("2. Carregar Excel Mês Anterior (Opcional)", type=["xlsx", "xls"], key="ref_extr")
-        st.caption("O sistema tentará preencher o acumulador automaticamente via Excel.")
-
-    if arquivos_pdf and st.button("🚀 Iniciar Extração", key="btn_extr"):
-        st.session_state.notas_extraidas = [] # Limpa para novo processamento
+    arquivos_pdf = st.file_uploader("Arraste os PDFs das notas aqui", type="pdf", accept_multiple_files=True)
+    
+    if arquivos_pdf and st.button("🚀 Processar PDFs"):
+        st.session_state.notas_extraidas = []
+        st.session_state.falhas = {}
         pbar = st.progress(0)
+        
         for idx, f in enumerate(arquivos_pdf):
             f_bytes = f.read()
             res, erro = extrair_dados_pdf_offline(f.name, f_bytes, cnpj_alvo) if modo_offline else call_gemini_api_direct(f.name, f_bytes, model_choice, api_input)
             if res: st.session_state.notas_extraidas.append(res)
             else: st.session_state.falhas[f.name] = erro
             pbar.progress((idx + 1) / len(arquivos_pdf))
+            
+    if st.session_state.notas_extraidas:
+        st.success(f"{len(st.session_state.notas_extraidas)} notas extraídas com sucesso!")
+        df_extr = pd.DataFrame(st.session_state.notas_extraidas)
+        st.dataframe(df_extr[['doc', 'cnpj_forn', 'valor_total', 'data', 'file_name']], use_container_width=True)
         
-        if st.session_state.notas_extraidas:
-            df_final = pd.DataFrame(st.session_state.notas_extraidas)
-            
-            # Cruzamento com Excel se fornecido
-            if arquivo_ref:
-                try:
-                    df_ref = pd.read_excel(arquivo_ref)
-                    df_ref.columns = [c.upper().strip() for c in df_ref.columns]
-                    if 'CNPJ' in df_ref.columns and 'ACUMULADOR' in df_ref.columns:
-                        df_ref['CNPJ_CLEAN'] = df_ref['CNPJ'].apply(lambda x: limpar_cnpj(str(x)))
-                        de_para = dict(zip(df_ref['CNPJ_CLEAN'], df_ref['ACUMULADOR']))
-                        
-                        def vincular_acum(cnpj):
-                            c = limpar_cnpj(cnpj)
-                            return str(de_para.get(c, '1'))
-                        
-                        df_final['acumulador'] = df_final['cnpj_forn'].apply(vincular_acum)
-                        st.success("✅ Confronto realizado no processamento!")
-                except Exception as e:
-                    st.error(f"Erro ao cruzar com Excel: {e}")
-
-            st.dataframe(df_final, use_container_width=True)
-            
-            # Botão de Download do Excel
-            excel_data = to_excel(df_final)
+        col1, col2 = st.columns(2)
+        with col1:
             st.download_button(
-                label="📥 Baixar Planilha para Ajustar no Excel",
-                data=excel_data,
-                file_name=f"notas_para_ajuste_{datetime.now().strftime('%d%m')}.xlsx",
+                label="📥 Baixar Planilha (Excel)",
+                data=to_excel(df_extr),
+                file_name=f"notas_extraidas_{datetime.now().strftime('%d%m')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
+        with col2:
+            buffer = [gerar_registro_0000(cnpj_alvo)]
+            for _, nf in df_extr.iterrows():
+                buffer.append(gerar_registro_1000(nf.to_dict(), texto_obs))
+                buffer.append(gerar_registro_1020(nf.to_dict()))
+                buffer.append(gerar_registro_1300(nf.to_dict(), texto_obs))
+            st.download_button(
+                label="📥 Baixar Arquivo Domínio (TXT)",
+                data="\r\n".join(buffer),
+                file_name=f"importacao_{datetime.now().strftime('%d%m_%H%M')}.txt",
+                mime="text/plain",
+                use_container_width=True
+            )
 
-# ---------------------------------------------------------
-# ABA 2: IMPORTAÇÃO (EXCEL -> TXT)
-# ---------------------------------------------------------
-with tab2:
-    st.subheader("Passo 2: Gerar Ficheiro para o Domínio")
-    st.write("Após fazer o cruzamento e as alterações no seu Excel, carregue a planilha final aqui.")
+    if st.session_state.falhas:
+        with st.expander("⚠️ Ver PDFs que falharam"):
+            st.table([{"Arquivo": k, "Erro": v} for k, v in st.session_state.falhas.items()])
+
+
+# =========================================================
+# MÓDULO 2: CONFRONTO EM EXCEL
+# =========================================================
+elif "2. Confronto e Edição" in ferramenta:
+    st.subheader("📊 Módulo de Confronto e Edição via Excel")
+    st.write("Cruze a planilha das notas atuais com a planilha do mês anterior. Baixe o resultado para alterar no Excel, ou gere o TXT.")
     
-    arquivo_final_excel = st.file_uploader("Carregar Planilha Ajustada (Excel)", type=["xlsx", "xls"], key="up_final")
-    
-    if arquivo_final_excel:
+    colA, colB = st.columns(2)
+    with colA:
+        excel_atual = st.file_uploader("1. Excel das Notas do Mês (Baixado no Passo 1)", type=["xlsx", "xls"])
+    with colB:
+        excel_base = st.file_uploader("2. Excel do Mês Anterior (Para Confronto - Opcional)", type=["xlsx", "xls"])
+        
+    if excel_atual:
         try:
-            df_ajustado = pd.read_excel(arquivo_final_excel)
-            st.info("Revisão rápida dos dados carregados:")
+            df_atual = pd.read_excel(excel_atual)
             
-            # Editor final apenas para conferência rápida
-            df_conferencia = st.data_editor(df_ajustado, use_container_width=True, hide_index=True)
-            
-            if st.button("💾 Gerar Arquivo .TXT para Domínio", key="btn_gerar_txt"):
-                buffer = [gerar_registro_0000(cnpj_alvo)]
-                for _, nf in df_conferencia.iterrows():
-                    # Garante que os campos existem
-                    nf_dict = nf.to_dict()
-                    buffer.append(gerar_registro_1000(nf_dict, texto_obs))
-                    buffer.append(gerar_registro_1020(nf_dict))
-                    buffer.append(gerar_registro_1300(nf_dict, texto_obs))
+            if excel_base:
+                df_ref = pd.read_excel(excel_base)
+                df_ref.columns = [c.upper().strip() for c in df_ref.columns]
                 
+                if 'CNPJ' in df_ref.columns and 'ACUMULADOR' in df_ref.columns:
+                    df_ref['CNPJ_CLEAN'] = df_ref['CNPJ'].apply(lambda x: limpar_cnpj(str(x)))
+                    de_para = dict(zip(df_ref['CNPJ_CLEAN'], df_ref['ACUMULADOR']))
+                    
+                    def vincular_acum(cnpj):
+                        return str(de_para.get(limpar_cnpj(cnpj), '1'))
+                        
+                    if 'cnpj_forn' in df_atual.columns:
+                        df_atual['acumulador'] = df_atual['cnpj_forn'].apply(vincular_acum)
+                        st.success("✅ Cruzamento com o mês anterior realizado com sucesso!")
+                else:
+                    st.warning("O Excel anterior não tem as colunas 'CNPJ' e 'ACUMULADOR'.")
+            
+            st.write("Pré-visualização da Planilha:")
+            st.dataframe(df_atual, use_container_width=True)
+            
+            col1, col2 = st.columns(2)
+            with col1:
                 st.download_button(
-                    label="📥 Descarregar Arquivo Domínio",
-                    data="\r\n".join(buffer),
-                    file_name=f"importacao_dominio_{datetime.now().strftime('%H%M')}.txt",
-                    mime="text/plain",
+                    label="📥 Baixar Excel Cruzado (Para alterar no seu PC)",
+                    data=to_excel(df_atual),
+                    file_name=f"notas_confrontadas_{datetime.now().strftime('%d%m')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True
                 )
+            with col2:
+                if st.button("💾 Gerar TXT para o Domínio a partir desta planilha", use_container_width=True):
+                    buffer = [gerar_registro_0000(cnpj_alvo)]
+                    for _, nf in df_atual.iterrows():
+                        nf_dict = nf.to_dict()
+                        buffer.append(gerar_registro_1000(nf_dict, texto_obs))
+                        buffer.append(gerar_registro_1020(nf_dict))
+                        buffer.append(gerar_registro_1300(nf_dict, texto_obs))
+                    st.download_button(
+                        label="📥 Descarregar Arquivo Domínio (TXT)",
+                        data="\r\n".join(buffer),
+                        file_name=f"importacao_final_{datetime.now().strftime('%H%M')}.txt",
+                        mime="text/plain",
+                        use_container_width=True
+                    )
         except Exception as e:
-            st.error(f"Erro ao ler a planilha ajustada: {e}")
-
-# Exibição de Erros de Extração
-if st.session_state.falhas:
-    with st.expander("⚠️ Falhas na Extração de PDFs"):
-        st.table([{"Arquivo": k, "Erro": v} for k, v in st.session_state.falhas.items()])
-
-st.divider()
-st.caption("Domínio Automator v10.5 - Foco em Fluxo via Excel.")
+            st.error(f"Erro ao processar as planilhas: {e}")
