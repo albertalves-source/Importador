@@ -23,7 +23,7 @@ class JSONParser:
             return texto
 
 # ==========================================
-# MOTOR DE EXTRAÇÃO PDF (ATUALIZADO V11 - Anti-Falhas)
+# MOTOR DE EXTRAÇÃO PDF (ATUALIZADO V11.1)
 # ==========================================
 def extrair_dados_pdf_offline(file_name, file_bytes, cnpj_destino_usuario):
     try:
@@ -62,7 +62,6 @@ def extrair_dados_pdf_offline(file_name, file_bytes, cnpj_destino_usuario):
         if not dados["cnpj_forn"]:
             dados["cnpj_forn"] = todos_numeros_longos[0] if todos_numeros_longos else "00000000000000"
 
-        # BUSCA DE DOCUMENTO MAIS AGRESSIVA
         doc_str = None
         padroes_doc = [
             r"NUMERO DA NFS-E[^\d]{0,50}?0*(\d{1,15})",
@@ -82,7 +81,6 @@ def extrair_dados_pdf_offline(file_name, file_bytes, cnpj_destino_usuario):
                 doc_str = validos[0]
                 break
 
-        # FALLBACK PARA O NOME DO ARQUIVO (Evita o erro "Dados insuficientes")
         if not doc_str:
             nums_arq = re.findall(r'\d+', file_name)
             validos_arq = [n for n in nums_arq if n not in ['2024', '2025', '2026', '2027'] and int(n) > 0]
@@ -96,12 +94,10 @@ def extrair_dados_pdf_offline(file_name, file_bytes, cnpj_destino_usuario):
         else:
             dados["doc"] = 1
 
-        # DATA (Com fallback para hoje para não invalidar a nota)
         data_match = re.search(r"(\d{2}/\d{2}/\d{4})", texto_denso)
         if data_match: dados["data"] = data_match.group(1)
         else: dados["data"] = datetime.now().strftime("%d/%m/%Y")
 
-        # BUSCA DE VALOR MAIS FLEXÍVEL
         valores_float = []
         todos_brutos = re.findall(r"(\d{1,10}(?:[.,]\d{3})*[.,]\d{2})", texto_limpo)
         if not todos_brutos:
@@ -117,7 +113,6 @@ def extrair_dados_pdf_offline(file_name, file_bytes, cnpj_destino_usuario):
         
         if valores_float: dados["valor_total"] = max(valores_float)
             
-        # Validação final: Só rejeita se não encontrar o valor financeiro
         if dados["valor_total"] is not None:
             return dados, None
             
@@ -173,16 +168,14 @@ def to_excel(df):
     return output.getvalue()
 
 # --- INTERFACE ---
-st.set_page_config(page_title="Domínio Automator v11", layout="wide")
-st.title("⚡ Domínio Automator - V11")
+st.set_page_config(page_title="Domínio Automator v11.1", layout="wide")
+st.title("⚡ Domínio Automator - V11.1")
 
-# Inicialização de estados
 if 'notas_extraidas' not in st.session_state: st.session_state.notas_extraidas = []
 if 'falhas' not in st.session_state: st.session_state.falhas = {}
 
 with st.sidebar:
     st.header("🔀 Ferramentas (Separadas)")
-    # RADIO BUTTON PARA SEPARAR OS MÓDULOS COMPLETAMENTE
     ferramenta = st.radio("Selecione o que deseja fazer:", [
         "📄 1. Importar Notas (De PDF para Excel/TXT)",
         "📊 2. Confronto e Edição (De Excel para Excel/TXT)"
@@ -204,7 +197,6 @@ with st.sidebar:
         st.session_state.notas_extraidas = []
         st.session_state.falhas = {}
         st.rerun()
-
 
 # =========================================================
 # MÓDULO 1: APENAS IMPORTAÇÃO DE PDFS
@@ -259,7 +251,6 @@ if "1. Importar Notas" in ferramenta:
         with st.expander("⚠️ Ver PDFs que falharam"):
             st.table([{"Arquivo": k, "Erro": v} for k, v in st.session_state.falhas.items()])
 
-
 # =========================================================
 # MÓDULO 2: CONFRONTO EM EXCEL
 # =========================================================
@@ -269,17 +260,26 @@ elif "2. Confronto e Edição" in ferramenta:
     
     colA, colB = st.columns(2)
     with colA:
-        excel_atual = st.file_uploader("1. Excel das Notas do Mês (Baixado no Passo 1)", type=["xlsx", "xls"])
+        excel_atual = st.file_uploader("1. Excel das Notas do Mês (Baixado no Passo 1)", type=["xlsx", "xls", "csv"])
     with colB:
-        excel_base = st.file_uploader("2. Excel do Mês Anterior (Para Confronto - Opcional)", type=["xlsx", "xls"])
+        excel_base = st.file_uploader("2. Excel do Mês Anterior (Para Confronto - Opcional)", type=["xlsx", "xls", "csv"])
         
     if excel_atual:
         try:
-            df_atual = pd.read_excel(excel_atual)
+            # Correção para aceitar CSV (já que os arquivos subidos tinham esse formato também)
+            if excel_atual.name.endswith('.csv'):
+                df_atual = pd.read_csv(excel_atual)
+            else:
+                df_atual = pd.read_excel(excel_atual)
             
             if excel_base:
-                df_ref = pd.read_excel(excel_base)
-                df_ref.columns = [c.upper().strip() for c in df_ref.columns]
+                if excel_base.name.endswith('.csv'):
+                    df_ref = pd.read_csv(excel_base)
+                else:
+                    df_ref = pd.read_excel(excel_base)
+                
+                # CORREÇÃO APLICADA AQUI: str(c) converte qualquer nome de coluna (inclusive números) para texto
+                df_ref.columns = [str(c).upper().strip() for c in df_ref.columns]
                 
                 if 'CNPJ' in df_ref.columns and 'ACUMULADOR' in df_ref.columns:
                     df_ref['CNPJ_CLEAN'] = df_ref['CNPJ'].apply(lambda x: limpar_cnpj(str(x)))
@@ -292,7 +292,7 @@ elif "2. Confronto e Edição" in ferramenta:
                         df_atual['acumulador'] = df_atual['cnpj_forn'].apply(vincular_acum)
                         st.success("✅ Cruzamento com o mês anterior realizado com sucesso!")
                 else:
-                    st.warning("O Excel anterior não tem as colunas 'CNPJ' e 'ACUMULADOR'.")
+                    st.warning("O Excel anterior não tem as colunas 'CNPJ' e 'ACUMULADOR' bem definidas.")
             
             st.write("Pré-visualização da Planilha:")
             st.dataframe(df_atual, use_container_width=True)
