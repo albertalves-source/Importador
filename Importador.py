@@ -27,6 +27,58 @@ def to_excel(df):
         df.to_excel(writer, index=False, sheet_name='Confronto')
     return output.getvalue()
 
+# Inteligência para ler o relatório bruto exportado do sistema Domínio
+def carregar_planilha_segura(arquivo):
+    arquivo.seek(0)
+    if arquivo.name.lower().endswith('.csv'):
+        try:
+            df_temp = pd.read_csv(arquivo, header=None, dtype=str, sep=None, engine='python')
+        except:
+            arquivo.seek(0)
+            df_temp = pd.read_csv(arquivo, header=None, dtype=str)
+    else:
+        df_temp = pd.read_excel(arquivo, header=None, dtype=str)
+        
+    # Caça a linha onde o cabeçalho real começa
+    idx_header = 0
+    for i, row in df_temp.iterrows():
+        valores = [str(x).strip().upper() for x in row.values if pd.notna(x)]
+        if "AC." in valores or "ACUMULADOR" in valores or "CNPJ" in valores or "CNPJ_FORN" in valores or "FORNECEDOR" in valores:
+            idx_header = i
+            break
+            
+    df = df_temp.iloc[idx_header+1:].copy()
+    colunas = [str(c).strip().upper() for c in df_temp.iloc[idx_header].values]
+    
+    # Limpa nomes bizarros (UNNAMED, NAN, etc)
+    colunas_limpas = []
+    for i, c in enumerate(colunas):
+        if c in ['NAN', 'NONE', '']: colunas_limpas.append(f"COL_{i}")
+        else: colunas_limpas.append(c)
+    df.columns = colunas_limpas
+    
+    # Padronização do layout do Domínio
+    if 'AC.' in df.columns: df.rename(columns={'AC.': 'ACUMULADOR'}, inplace=True)
+    
+    # Se o Domínio não gerou coluna CNPJ, extraímos do nome do Fornecedor (ex: "64.717.612 PAULO VINICIUS")
+    if 'CNPJ' not in df.columns and 'FORNECEDOR' in df.columns:
+        def extrair_cnpj(texto):
+            nums = limpar_cnpj(str(texto))
+            return nums if len(nums) >= 11 else ""
+        df['CNPJ'] = df['FORNECEDOR'].apply(extrair_cnpj)
+        
+    # Mantém a compatibilidade com as colunas geradas pelo nosso Módulo 1
+    col_map = {
+        'DOC': 'doc', 
+        'CNPJ_FORN': 'cnpj_forn', 
+        'VALOR_TOTAL': 'valor_total', 
+        'DATA': 'data',
+        'FILE_NAME': 'file_name'
+    }
+    df.rename(columns=col_map, inplace=True)
+    
+    return df
+
 # --- MOTORES DE LEITURA (PDF / IA) ---
 def extrair_dados_pdf_offline(file_name, file_bytes, cnpj_destino_usuario):
     try:
@@ -93,8 +145,8 @@ def gerar_registro_1300(nf, obs):
     return f"|1300|{nf.get('data','')}|55|5|{formatar_valor(nf.get('valor_total',0))}|1|{obs}|SISTEMA|"
 
 # --- INTERFACE ---
-st.set_page_config(page_title="Domínio Automator v11.2", layout="wide")
-st.title("⚡ Domínio Automator - V11.2")
+st.set_page_config(page_title="Domínio Automator v11.3", layout="wide")
+st.title("⚡ Domínio Automator - V11.3")
 
 with st.sidebar:
     ferramenta = st.radio("Módulo:", ["📄 1. Importar PDFs", "📊 2. Confronto Excel"])
@@ -130,23 +182,24 @@ elif "2." in ferramenta:
 
     if f_atual and f_base:
         try:
-            df_at = pd.read_excel(f_atual) if f_atual.name.endswith('x') else pd.read_csv(f_atual)
-            df_bs = pd.read_excel(f_base) if f_base.name.endswith('x') else pd.read_csv(f_base)
+            # Novo carregador seguro que ignora cabeçalhos sujos do Domínio
+            df_at = carregar_planilha_segura(f_atual)
+            df_bs = carregar_planilha_segura(f_base)
             
-            # Normalização de colunas
-            df_bs.columns = [str(c).strip().upper() for c in df_bs.columns]
-            colunas_encontradas = list(df_bs.columns)
-            
-            if 'CNPJ' in colunas_encontradas and 'ACUMULADOR' in colunas_encontradas:
+            if 'CNPJ' in df_bs.columns and 'ACUMULADOR' in df_bs.columns:
                 df_bs['CNPJ_KEY'] = df_bs['CNPJ'].apply(lambda x: limpar_cnpj(str(x)))
-                # Remove duplicados da base para não triplicar linhas no merge
+                df_bs = df_bs[df_bs['CNPJ_KEY'] != ""] # Remove linhas sem CNPJ extraído
                 df_bs = df_bs.drop_duplicates(subset=['CNPJ_KEY']).set_index('CNPJ_KEY')
                 
-                # Merge
-                df_at['cnpj_key'] = df_at['cnpj_forn'].apply(lambda x: limpar_cnpj(str(x)))
-                df_at['acumulador_anterior'] = df_at['cnpj_key'].map(df_bs['ACUMULADOR']).fillna("NÃO ENCONTRADO")
+                # Prepara o lado atual
+                col_cnpj_at = 'cnpj_forn' if 'cnpj_forn' in df_at.columns else 'CNPJ'
+                if col_cnpj_at in df_at.columns:
+                    df_at['cnpj_key'] = df_at[col_cnpj_at].apply(lambda x: limpar_cnpj(str(x)))
+                    df_at['acumulador_anterior'] = df_at['cnpj_key'].map(df_bs['ACUMULADOR']).fillna("NÃO ENCONTRADO")
+                else:
+                    df_at['acumulador_anterior'] = "NÃO ENCONTRADO"
                 
-                # Preenche o acumulador atual com o anterior (se for número) ou mantém 1
+                # Sugere o acumulador baseado no anterior
                 def sugerir_acum(v):
                     try: return str(int(float(v)))
                     except: return "1"
@@ -154,8 +207,9 @@ elif "2." in ferramenta:
                 
                 st.info("💡 Compare as colunas abaixo. Você pode editar a coluna 'Acumulador (PARA IMPORTAR)'.")
                 
-                # Exibição organizada
-                cols_view = ['doc', 'cnpj_forn', 'acumulador_anterior', 'acumulador', 'valor_total', 'data']
+                # Configuração da visualização lado a lado
+                cols_view = [c for c in ['doc', 'cnpj_forn', 'acumulador_anterior', 'acumulador', 'valor_total', 'data'] if c in df_at.columns]
+                
                 df_final = st.data_editor(
                     df_at[cols_view],
                     column_config={
@@ -174,7 +228,5 @@ elif "2." in ferramenta:
                         buf.extend([gerar_registro_1000(n, texto_obs), gerar_registro_1020(n), gerar_registro_1300(n, texto_obs)])
                     st.download_button("Baixar TXT", "\r\n".join(buf), "importacao.txt")
             else:
-                st.error("❌ Colunas 'CNPJ' ou 'ACUMULADOR' não encontradas.")
-                st.write(f"Colunas detectadas no seu arquivo: {colunas_encontradas}")
-                st.write("Dica: Renomeie as colunas no seu Excel para exatamente 'CNPJ' e 'ACUMULADOR'.")
+                st.error("❌ O sistema não conseguiu extrair as colunas 'CNPJ' ou 'ACUMULADOR'. Verifique se o relatório está correto.")
         except Exception as e: st.error(f"Erro: {e}")
