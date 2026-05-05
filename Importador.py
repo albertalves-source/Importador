@@ -76,6 +76,15 @@ def carregar_planilha_segura(arquivo):
         else:
             df['cnpj_forn'] = ""
             
+    # Limpar coluna de acumulador para evitar que "1052.0" fique diferente de "1052"
+    if 'acumulador' in df.columns:
+        def limpa_acum(v):
+            s = str(v).strip().upper()
+            if s == 'NAN' or s == 'NONE': return ''
+            if s.endswith('.0'): return s[:-2]
+            return s
+        df['acumulador'] = df['acumulador'].apply(limpa_acum)
+
     # Assegurar que os valores financeiros são números formatados corretamente
     if 'valor_total' in df.columns:
         def to_float(x):
@@ -156,11 +165,11 @@ def gerar_registro_1300(nf, obs):
     return f"|1300|{nf.get('data','')}|55|5|{formatar_valor(nf.get('valor_total',0))}|1|{obs}|SISTEMA|"
 
 # --- INTERFACE ---
-st.set_page_config(page_title="Domínio Automator v11.5", layout="wide")
-st.title("⚡ Domínio Automator - V11.5")
+st.set_page_config(page_title="Domínio Automator v11.6", layout="wide")
+st.title("⚡ Domínio Automator - V11.6")
 
 with st.sidebar:
-    ferramenta = st.radio("Módulo:", ["📄 1. Importar PDFs", "📊 2. Confronto Excel"])
+    ferramenta = st.radio("Módulo:", ["📄 1. Importar PDFs", "📊 2. Auditoria/Confronto Excel"])
     st.markdown("---")
     cnpj_alvo = st.text_input("CNPJ Destino", value="40633348000130")
     texto_obs = st.text_input("Observação", value="IMPORTACAO AUTOMATICA")
@@ -186,18 +195,21 @@ if "1." in ferramenta:
 
 # --- MÓDULO 2: CONFRONTO ---
 elif "2." in ferramenta:
-    st.subheader("Confronto de Acumuladores (Mês Atual vs Anterior)")
+    st.subheader("Auditoria de Acumuladores (Mês Atual vs Anterior)")
     c1, c2 = st.columns(2)
-    with c1: f_atual = st.file_uploader("Excel Atual", type=["xlsx","csv"])
-    with c2: f_base = st.file_uploader("Excel Anterior (Base)", type=["xlsx","csv"])
+    with c1: f_atual = st.file_uploader("Excel Atual (ex: Março)", type=["xlsx","csv"])
+    with c2: f_base = st.file_uploader("Excel Anterior Base (ex: Fevereiro)", type=["xlsx","csv"])
 
     if f_atual and f_base:
         try:
             df_at = carregar_planilha_segura(f_atual)
             df_bs = carregar_planilha_segura(f_base)
             
+            # 1. Preserva o acumulador do mês atual que veio na planilha
+            df_at['acumulador_mes_atual'] = df_at['acumulador'] if 'acumulador' in df_at.columns else "1"
+            
             if 'acumulador' in df_bs.columns:
-                # Cria chaves de busca duplas (Por CNPJ e Por NOME)
+                # 2. Busca o acumulador do mês anterior (Por CNPJ e Por NOME)
                 df_bs['match_cnpj'] = df_bs.get('cnpj_forn', pd.Series(dtype=str)).apply(lambda x: limpar_cnpj(str(x)))
                 df_bs['match_nome'] = df_bs.get('nome_fornecedor', pd.Series(dtype=str)).apply(lambda x: str(x).strip().upper())
                 
@@ -214,21 +226,32 @@ elif "2." in ferramenta:
                 
                 df_at['acumulador_anterior'] = df_at.apply(buscar_acumulador, axis=1)
                 
-                def sugerir_acum(v):
-                    try: return str(int(float(v)))
-                    except: return "1"
-                df_at['acumulador'] = df_at['acumulador_anterior'].apply(sugerir_acum)
+                # 3. Lógica de Auditoria (Status)
+                def verificar_status(row):
+                    ant = str(row['acumulador_anterior']).strip()
+                    atu = str(row['acumulador_mes_atual']).strip()
+                    if ant == "NÃO ENCONTRADO": return "🆕 NOVO"
+                    if ant == atu: return "✅ OK"
+                    return "⚠️ DIVERGENTE"
+                    
+                df_at['Status'] = df_at.apply(verificar_status, axis=1)
                 
-                st.info("💡 Compare as colunas abaixo. Você pode editar a coluna 'AC (Novo)'.")
+                # A coluna que será exportada começa igual a do mês atual (para você corrigir se quiser)
+                df_at['acumulador'] = df_at['acumulador_mes_atual']
                 
-                # Configuração da visualização Bonita e Completa
-                cols_view = [c for c in ['doc', 'nome_fornecedor', 'cnpj_forn', 'acumulador_anterior', 'acumulador', 'valor_total', 'data'] if c in df_at.columns]
+                st.info("💡 Clique na coluna 'Status' para ordenar. Altere os valores errados na coluna '✏️ AC (Correção/Final)'.")
+                
+                # Configuração da visualização Auditoria
+                cols_view = ['Status', 'doc', 'nome_fornecedor', 'cnpj_forn', 'acumulador_anterior', 'acumulador_mes_atual', 'acumulador', 'valor_total', 'data']
+                cols_view = [c for c in cols_view if c in df_at.columns]
                 
                 df_final = st.data_editor(
                     df_at[cols_view],
                     column_config={
+                        "Status": st.column_config.TextColumn("Status", disabled=True),
                         "acumulador_anterior": st.column_config.TextColumn("🔍 AC (Mês Ant.)", disabled=True),
-                        "acumulador": st.column_config.TextColumn("✏️ AC (Novo)"),
+                        "acumulador_mes_atual": st.column_config.TextColumn("📄 AC (Mês Atual)", disabled=True),
+                        "acumulador": st.column_config.TextColumn("✏️ AC (Correção/Final)", help="Edite este valor caso o Mês Atual esteja divergente do Mês Anterior"),
                         "nome_fornecedor": st.column_config.TextColumn("Fornecedor", disabled=True),
                         "cnpj_forn": st.column_config.TextColumn("CNPJ", disabled=True),
                         "doc": st.column_config.TextColumn("Nota", disabled=True),
@@ -244,9 +267,9 @@ elif "2." in ferramenta:
                 with col_btn1:
                     excel_data = to_excel(df_final)
                     st.download_button(
-                        label="📥 Baixar Planilha do Confronto (Excel)",
+                        label="📥 Baixar Planilha Auditada (Excel)",
                         data=excel_data,
-                        file_name=f"confronto_{datetime.now().strftime('%d%m_%H%M')}.xlsx",
+                        file_name=f"auditoria_{datetime.now().strftime('%d%m_%H%M')}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         use_container_width=True
                     )
