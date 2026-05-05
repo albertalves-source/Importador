@@ -156,8 +156,8 @@ def gerar_registro_1300(nf, obs):
     return f"|1300|{nf.get('data','')}|55|5|{formatar_valor(nf.get('valor_total',0))}|1|{obs}|SISTEMA|"
 
 # --- INTERFACE ---
-st.set_page_config(page_title="Domínio Automator v11.4", layout="wide")
-st.title("⚡ Domínio Automator - V11.4")
+st.set_page_config(page_title="Domínio Automator v11.5", layout="wide")
+st.title("⚡ Domínio Automator - V11.5")
 
 with st.sidebar:
     ferramenta = st.radio("Módulo:", ["📄 1. Importar PDFs", "📊 2. Confronto Excel"])
@@ -238,12 +238,33 @@ elif "2." in ferramenta:
                     hide_index=True, use_container_width=True
                 )
                 
-                if st.button("💾 Gerar TXT Domínio"):
+                st.markdown("<br>", unsafe_allow_html=True)
+                col_btn1, col_btn2 = st.columns(2)
+                
+                with col_btn1:
+                    excel_data = to_excel(df_final)
+                    st.download_button(
+                        label="📥 Baixar Planilha do Confronto (Excel)",
+                        data=excel_data,
+                        file_name=f"confronto_{datetime.now().strftime('%d%m_%H%M')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
+                
+                with col_btn2:
                     buf = [gerar_registro_0000(cnpj_alvo)]
                     for _, nf in df_final.iterrows():
                         n = nf.to_dict()
                         buf.extend([gerar_registro_1000(n, texto_obs), gerar_registro_1020(n), gerar_registro_1300(n, texto_obs)])
-                    st.download_button("Baixar TXT", "\r\n".join(buf), "importacao.txt")
+                    
+                    st.download_button(
+                        label="💾 Baixar Arquivo Domínio (TXT)",
+                        data="\r\n".join(buf),
+                        file_name=f"importacao_{datetime.now().strftime('%d%m_%H%M')}.txt",
+                        mime="text/plain",
+                        use_container_width=True
+                    )
+
             else:
                 st.error("❌ O sistema não conseguiu achar a coluna do 'Acumulador' na planilha base.")
         except Exception as e: st.error(f"Erro no processamento: {e}")
