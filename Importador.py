@@ -43,40 +43,55 @@ def carregar_planilha_segura(arquivo):
     idx_header = 0
     for i, row in df_temp.iterrows():
         valores = [str(x).strip().upper() for x in row.values if pd.notna(x)]
-        if "AC." in valores or "ACUMULADOR" in valores or "CNPJ" in valores or "CNPJ_FORN" in valores or "FORNECEDOR" in valores:
+        if "AC." in valores or "ACUMULADOR" in valores or "CNPJ" in valores or "FORNECEDOR" in valores:
             idx_header = i
             break
             
     df = df_temp.iloc[idx_header+1:].copy()
-    colunas = [str(c).strip().upper() for c in df_temp.iloc[idx_header].values]
+    colunas_brutas = [str(c).strip().upper() for c in df_temp.iloc[idx_header].values]
     
     # Limpa nomes bizarros (UNNAMED, NAN, etc)
     colunas_limpas = []
-    for i, c in enumerate(colunas):
+    for i, c in enumerate(colunas_brutas):
         if c in ['NAN', 'NONE', '']: colunas_limpas.append(f"COL_{i}")
         else: colunas_limpas.append(c)
     df.columns = colunas_limpas
     
-    # Padronização do layout do Domínio
-    if 'AC.' in df.columns: df.rename(columns={'AC.': 'ACUMULADOR'}, inplace=True)
+    # Padronização MÁXIMA do layout do Domínio para o nosso sistema
+    for col in df.columns:
+        if col in ['AC.', 'ACUMULADOR']: df.rename(columns={col: 'acumulador'}, inplace=True)
+        elif col in ['NOTA', 'DOC']: df.rename(columns={col: 'doc'}, inplace=True)
+        elif col in ['DATA']: df.rename(columns={col: 'data'}, inplace=True)
+        elif 'VALOR CONT' in col or col == 'VALOR_TOTAL': df.rename(columns={col: 'valor_total'}, inplace=True)
+        elif col == 'FORNECEDOR': df.rename(columns={col: 'nome_fornecedor'}, inplace=True)
+        elif col in ['CNPJ', 'CNPJ_FORN']: df.rename(columns={col: 'cnpj_forn'}, inplace=True)
     
-    # Se o Domínio não gerou coluna CNPJ, extraímos do nome do Fornecedor (ex: "64.717.612 PAULO VINICIUS")
-    if 'CNPJ' not in df.columns and 'FORNECEDOR' in df.columns:
-        def extrair_cnpj(texto):
-            nums = limpar_cnpj(str(texto))
-            return nums if len(nums) >= 11 else ""
-        df['CNPJ'] = df['FORNECEDOR'].apply(extrair_cnpj)
+    # Se o Domínio não gerou coluna CNPJ, tenta extrair do nome do Fornecedor
+    if 'cnpj_forn' not in df.columns:
+        if 'nome_fornecedor' in df.columns:
+            def extrair_cnpj(texto):
+                nums = limpar_cnpj(str(texto))
+                return nums if len(nums) >= 11 else ""
+            df['cnpj_forn'] = df['nome_fornecedor'].apply(extrair_cnpj)
+        else:
+            df['cnpj_forn'] = ""
+            
+    # Assegurar que os valores financeiros são números formatados corretamente
+    if 'valor_total' in df.columns:
+        def to_float(x):
+            if pd.isna(x): return 0.0
+            s = str(x).strip()
+            if ',' in s and '.' in s: s = s.replace('.', '').replace(',', '.')
+            elif ',' in s: s = s.replace(',', '.')
+            try: return float(s)
+            except: return 0.0
+        df['valor_total'] = df['valor_total'].apply(to_float)
         
-    # Mantém a compatibilidade com as colunas geradas pelo nosso Módulo 1
-    col_map = {
-        'DOC': 'doc', 
-        'CNPJ_FORN': 'cnpj_forn', 
-        'VALOR_TOTAL': 'valor_total', 
-        'DATA': 'data',
-        'FILE_NAME': 'file_name'
-    }
-    df.rename(columns=col_map, inplace=True)
-    
+    # Limpeza de lixo gerado nos relatórios Domínio (linhas de "Total Acumulador" ou em branco)
+    if 'nome_fornecedor' in df.columns:
+        df = df[~df['nome_fornecedor'].astype(str).str.upper().isin(['NAN', 'NONE', 'TOTAL ACUMULADOR', ''])]
+        df = df.dropna(subset=['nome_fornecedor'])
+
     return df
 
 # --- MOTORES DE LEITURA (PDF / IA) ---
@@ -92,7 +107,6 @@ def extrair_dados_pdf_offline(file_name, file_bytes, cnpj_destino_usuario):
         
         dados = {"doc": None, "serie": "1", "data": None, "cnpj_forn": None, "valor_total": None, "acumulador": "1", "file_name": file_name}
         
-        # Busca CNPJ Fornecedor
         cnpj_alvo = limpar_cnpj(cnpj_destino_usuario)
         docs = list(dict.fromkeys(re.findall(r'\d{14}|\d{11}', texto_denso)))
         for d in docs:
@@ -101,24 +115,21 @@ def extrair_dados_pdf_offline(file_name, file_bytes, cnpj_destino_usuario):
                 break
         if not dados["cnpj_forn"]: dados["cnpj_forn"] = docs[0] if docs else "00000000000000"
 
-        # Busca Número Documento
         doc_str = None
         for p in [r"NFS-E[^\d]{0,30}?0*(\d+)", r"NUMERO[^\d]{0,50}?0*(\d+)", r"NF-?E?\s*[:.-]?\s*0*(\d+)"]:
             m = re.findall(p, texto_limpo)
             validos = [x for x in m if x not in ['2024','2025','2026','0']]
             if validos: {doc_str := validos[0]}; break
         
-        if not doc_str: # Fallback nome arquivo
+        if not doc_str:
             nums = re.findall(r'\d+', file_name)
             if nums: doc_str = max(nums, key=len)
 
         dados["doc"] = int(doc_str) if doc_str else 1
         
-        # Data
         dt = re.search(r"(\d{2}/\d{2}/\d{4})", texto_denso)
         dados["data"] = dt.group(1) if dt else datetime.now().strftime("%d/%m/%Y")
 
-        # Valor
         v_matches = re.findall(r"(\d{1,10}(?:[.,]\d{3})*[.,]\d{2})", texto_limpo)
         if v_matches:
             vals = []
@@ -145,8 +156,8 @@ def gerar_registro_1300(nf, obs):
     return f"|1300|{nf.get('data','')}|55|5|{formatar_valor(nf.get('valor_total',0))}|1|{obs}|SISTEMA|"
 
 # --- INTERFACE ---
-st.set_page_config(page_title="Domínio Automator v11.3", layout="wide")
-st.title("⚡ Domínio Automator - V11.3")
+st.set_page_config(page_title="Domínio Automator v11.4", layout="wide")
+st.title("⚡ Domínio Automator - V11.4")
 
 with st.sidebar:
     ferramenta = st.radio("Módulo:", ["📄 1. Importar PDFs", "📊 2. Confronto Excel"])
@@ -182,41 +193,47 @@ elif "2." in ferramenta:
 
     if f_atual and f_base:
         try:
-            # Novo carregador seguro que ignora cabeçalhos sujos do Domínio
             df_at = carregar_planilha_segura(f_atual)
             df_bs = carregar_planilha_segura(f_base)
             
-            if 'CNPJ' in df_bs.columns and 'ACUMULADOR' in df_bs.columns:
-                df_bs['CNPJ_KEY'] = df_bs['CNPJ'].apply(lambda x: limpar_cnpj(str(x)))
-                df_bs = df_bs[df_bs['CNPJ_KEY'] != ""] # Remove linhas sem CNPJ extraído
-                df_bs = df_bs.drop_duplicates(subset=['CNPJ_KEY']).set_index('CNPJ_KEY')
+            if 'acumulador' in df_bs.columns:
+                # Cria chaves de busca duplas (Por CNPJ e Por NOME)
+                df_bs['match_cnpj'] = df_bs.get('cnpj_forn', pd.Series(dtype=str)).apply(lambda x: limpar_cnpj(str(x)))
+                df_bs['match_nome'] = df_bs.get('nome_fornecedor', pd.Series(dtype=str)).apply(lambda x: str(x).strip().upper())
                 
-                # Prepara o lado atual
-                col_cnpj_at = 'cnpj_forn' if 'cnpj_forn' in df_at.columns else 'CNPJ'
-                if col_cnpj_at in df_at.columns:
-                    df_at['cnpj_key'] = df_at[col_cnpj_at].apply(lambda x: limpar_cnpj(str(x)))
-                    df_at['acumulador_anterior'] = df_at['cnpj_key'].map(df_bs['ACUMULADOR']).fillna("NÃO ENCONTRADO")
-                else:
-                    df_at['acumulador_anterior'] = "NÃO ENCONTRADO"
+                map_by_cnpj = df_bs[df_bs['match_cnpj'] != ""].drop_duplicates('match_cnpj').set_index('match_cnpj')['acumulador'].to_dict()
+                map_by_nome = df_bs[df_bs['match_nome'] != "NAN"].drop_duplicates('match_nome').set_index('match_nome')['acumulador'].to_dict()
                 
-                # Sugere o acumulador baseado no anterior
+                def buscar_acumulador(row):
+                    cnpj = limpar_cnpj(str(row.get('cnpj_forn', '')))
+                    nome = str(row.get('nome_fornecedor', '')).strip().upper()
+                    
+                    if cnpj and cnpj in map_by_cnpj: return map_by_cnpj[cnpj]
+                    if nome and nome in map_by_nome: return map_by_nome[nome]
+                    return "NÃO ENCONTRADO"
+                
+                df_at['acumulador_anterior'] = df_at.apply(buscar_acumulador, axis=1)
+                
                 def sugerir_acum(v):
                     try: return str(int(float(v)))
                     except: return "1"
                 df_at['acumulador'] = df_at['acumulador_anterior'].apply(sugerir_acum)
                 
-                st.info("💡 Compare as colunas abaixo. Você pode editar a coluna 'Acumulador (PARA IMPORTAR)'.")
+                st.info("💡 Compare as colunas abaixo. Você pode editar a coluna 'AC (Novo)'.")
                 
-                # Configuração da visualização lado a lado
-                cols_view = [c for c in ['doc', 'cnpj_forn', 'acumulador_anterior', 'acumulador', 'valor_total', 'data'] if c in df_at.columns]
+                # Configuração da visualização Bonita e Completa
+                cols_view = [c for c in ['doc', 'nome_fornecedor', 'cnpj_forn', 'acumulador_anterior', 'acumulador', 'valor_total', 'data'] if c in df_at.columns]
                 
                 df_final = st.data_editor(
                     df_at[cols_view],
                     column_config={
-                        "acumulador_anterior": st.column_config.TextColumn("🔍 Acumulador (MÊS ANTERIOR)", disabled=True),
-                        "acumulador": st.column_config.TextColumn("✏️ Acumulador (PARA IMPORTAR)"),
-                        "cnpj_forn": st.column_config.TextColumn("Fornecedor", disabled=True),
-                        "valor_total": st.column_config.NumberColumn("Valor", format="%.2f", disabled=True)
+                        "acumulador_anterior": st.column_config.TextColumn("🔍 AC (Mês Ant.)", disabled=True),
+                        "acumulador": st.column_config.TextColumn("✏️ AC (Novo)"),
+                        "nome_fornecedor": st.column_config.TextColumn("Fornecedor", disabled=True),
+                        "cnpj_forn": st.column_config.TextColumn("CNPJ", disabled=True),
+                        "doc": st.column_config.TextColumn("Nota", disabled=True),
+                        "valor_total": st.column_config.NumberColumn("Valor R$", format="%.2f", disabled=True),
+                        "data": st.column_config.TextColumn("Data", disabled=True)
                     },
                     hide_index=True, use_container_width=True
                 )
@@ -228,5 +245,5 @@ elif "2." in ferramenta:
                         buf.extend([gerar_registro_1000(n, texto_obs), gerar_registro_1020(n), gerar_registro_1300(n, texto_obs)])
                     st.download_button("Baixar TXT", "\r\n".join(buf), "importacao.txt")
             else:
-                st.error("❌ O sistema não conseguiu extrair as colunas 'CNPJ' ou 'ACUMULADOR'. Verifique se o relatório está correto.")
-        except Exception as e: st.error(f"Erro: {e}")
+                st.error("❌ O sistema não conseguiu achar a coluna do 'Acumulador' na planilha base.")
+        except Exception as e: st.error(f"Erro no processamento: {e}")
