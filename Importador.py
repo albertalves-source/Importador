@@ -134,7 +134,12 @@ def extrair_dados_pdf_offline(file_name, file_bytes, cnpj_destino_usuario):
             nums = re.findall(r'\d+', file_name)
             if nums: doc_str = max(nums, key=len)
 
-        dados["doc"] = int(doc_str) if doc_str else 1
+        # Trata o Doc como string para não estourar o limite de inteiros na memória
+        if doc_str:
+            try: dados["doc"] = str(int(doc_str)) # Tenta remover os zeros à esquerda
+            except: dados["doc"] = str(doc_str)
+        else:
+            dados["doc"] = "1"
         
         dt = re.search(r"(\d{2}/\d{2}/\d{4})", texto_denso)
         dados["data"] = dt.group(1) if dt else datetime.now().strftime("%d/%m/%Y")
@@ -165,8 +170,8 @@ def gerar_registro_1300(nf, obs):
     return f"|1300|{nf.get('data','')}|55|5|{formatar_valor(nf.get('valor_total',0))}|1|{obs}|SISTEMA|"
 
 # --- INTERFACE ---
-st.set_page_config(page_title="Domínio Automator v11.7", layout="wide")
-st.title("⚡ Domínio Automator - V11.7")
+st.set_page_config(page_title="Domínio Automator v11.8", layout="wide")
+st.title("⚡ Domínio Automator - V11.8")
 
 with st.sidebar:
     ferramenta = st.radio("Módulo:", ["📄 1. Importar PDFs", "📊 2. Auditoria/Confronto Excel"])
@@ -190,6 +195,14 @@ if "1." in ferramenta:
 
     if 'notas' in st.session_state:
         df = pd.DataFrame(st.session_state.notas)
+        
+        # PREVENÇÃO DO OVERFLOW ERROR NO PYARROW
+        # Converte as colunas que podem ter números gigantes para texto antes de jogar na tabela
+        if 'doc' in df.columns:
+            df['doc'] = df['doc'].astype(str)
+        if 'cnpj_forn' in df.columns:
+            df['cnpj_forn'] = df['cnpj_forn'].astype(str)
+            
         st.dataframe(df, use_container_width=True)
         st.download_button("Baixar Excel", to_excel(df), "notas.xlsx")
 
