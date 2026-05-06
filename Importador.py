@@ -165,8 +165,8 @@ def gerar_registro_1300(nf, obs):
     return f"|1300|{nf.get('data','')}|55|5|{formatar_valor(nf.get('valor_total',0))}|1|{obs}|SISTEMA|"
 
 # --- INTERFACE ---
-st.set_page_config(page_title="Domínio Automator v11.6", layout="wide")
-st.title("⚡ Domínio Automator - V11.6")
+st.set_page_config(page_title="Domínio Automator v11.7", layout="wide")
+st.title("⚡ Domínio Automator - V11.7")
 
 with st.sidebar:
     ferramenta = st.radio("Módulo:", ["📄 1. Importar PDFs", "📊 2. Auditoria/Confronto Excel"])
@@ -205,8 +205,9 @@ elif "2." in ferramenta:
             df_at = carregar_planilha_segura(f_atual)
             df_bs = carregar_planilha_segura(f_base)
             
-            # 1. Preserva o acumulador do mês atual que veio na planilha
-            df_at['acumulador_mes_atual'] = df_at['acumulador'] if 'acumulador' in df_at.columns else "1"
+            # 1. Garante que o df_at tenha a coluna 'acumulador'
+            if 'acumulador' not in df_at.columns:
+                df_at['acumulador'] = "1"
             
             if 'acumulador' in df_bs.columns:
                 # 2. Busca o acumulador do mês anterior (Por CNPJ e Por NOME)
@@ -226,23 +227,20 @@ elif "2." in ferramenta:
                 
                 df_at['acumulador_anterior'] = df_at.apply(buscar_acumulador, axis=1)
                 
-                # 3. Lógica de Auditoria (Status)
+                # 3. Lógica de Auditoria (Status) comparando diretamente a coluna editável
                 def verificar_status(row):
                     ant = str(row['acumulador_anterior']).strip()
-                    atu = str(row['acumulador_mes_atual']).strip()
+                    atu = str(row['acumulador']).strip()
                     if ant == "NÃO ENCONTRADO": return "🆕 NOVO"
                     if ant == atu: return "✅ OK"
                     return "⚠️ DIVERGENTE"
                     
                 df_at['Status'] = df_at.apply(verificar_status, axis=1)
                 
-                # A coluna que será exportada começa igual a do mês atual (para você corrigir se quiser)
-                df_at['acumulador'] = df_at['acumulador_mes_atual']
+                st.info("💡 Clique na coluna 'Status' para ordenar. Avalie e edite os divergentes diretamente na coluna '✏️ AC (Mês Atual)'.")
                 
-                st.info("💡 Clique na coluna 'Status' para ordenar. Altere os valores errados na coluna '✏️ AC (Correção/Final)'.")
-                
-                # Configuração da visualização Auditoria
-                cols_view = ['Status', 'doc', 'nome_fornecedor', 'cnpj_forn', 'acumulador_anterior', 'acumulador_mes_atual', 'acumulador', 'valor_total', 'data']
+                # Configuração da visualização de Auditoria simplificada
+                cols_view = ['Status', 'doc', 'nome_fornecedor', 'cnpj_forn', 'acumulador_anterior', 'acumulador', 'valor_total', 'data']
                 cols_view = [c for c in cols_view if c in df_at.columns]
                 
                 df_final = st.data_editor(
@@ -250,8 +248,7 @@ elif "2." in ferramenta:
                     column_config={
                         "Status": st.column_config.TextColumn("Status", disabled=True),
                         "acumulador_anterior": st.column_config.TextColumn("🔍 AC (Mês Ant.)", disabled=True),
-                        "acumulador_mes_atual": st.column_config.TextColumn("📄 AC (Mês Atual)", disabled=True),
-                        "acumulador": st.column_config.TextColumn("✏️ AC (Correção/Final)", help="Edite este valor caso o Mês Atual esteja divergente do Mês Anterior"),
+                        "acumulador": st.column_config.TextColumn("✏️ AC (Mês Atual)"),
                         "nome_fornecedor": st.column_config.TextColumn("Fornecedor", disabled=True),
                         "cnpj_forn": st.column_config.TextColumn("CNPJ", disabled=True),
                         "doc": st.column_config.TextColumn("Nota", disabled=True),
